@@ -1,0 +1,20 @@
+[project]
+name = "hackathon"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Vadym Chobu", email = "vadym.chobu@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "marimo>=0.25.1",
+    "polars>=2.0.0",
+]
+
+[project.scripts]
+hackathon = "hackathon:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
