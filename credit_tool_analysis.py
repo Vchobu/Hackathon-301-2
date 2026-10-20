@@ -170,13 +170,166 @@ def _(periode_b):
     periode = periode_b["annee"].to_list()
     ANNEES = {"train": periode[:-2], "validation": [periode[-2]], "test": [periode[-1]]}
     ANNEES
-    return
+    return (ANNEES,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     ## 3. Analyse des features sélectionnées pour la période de train
+    """)
+    return
+
+
+@app.cell
+def _(ANNEES, pl, prets_36):
+    # Train : prêts terminés des années de train, cible defaut = 1
+    train = prets_36.filter(
+        pl.col("annee").is_in(ANNEES["train"]),
+        pl.col("loan_status").is_in(["Fully Paid", "Charged Off", "Default"]),
+    ).with_columns(
+        (pl.col("loan_status") != "Fully Paid").cast(pl.Int8).alias("defaut"),
+        # ratio montant / revenu : le montant seul ne dit presque rien, son poids sur le revenu oui
+        (pl.col("loan_amnt") / pl.col("annual_inc").clip(lower_bound=1)).alias("loan_to_income"),
+    )
+    print(f"Train : {train.height} prêts, {train['defaut'].mean() * 100:.1f} % de défauts")
+    return (train,)
+
+
+@app.cell
+def _(candidats, pl, train):
+    # Séparation valeurs numériques vs texte
+
+    # a. Valeur numérique
+    # on ne prend que fico_range_low car fico_range_high = low + 4 (tranche de 5 points)
+    NUM = [c for c in candidats if train[c].dtype.is_numeric() and c != "fico_range_high"] + ["loan_to_income"]
+
+    # b. Valeurs texte
+    CAT = [c for c in candidats if train[c].dtype == pl.String]
+    print("NUM :", NUM)
+    print("CAT :", CAT)
+    return (NUM,)
+
+
+@app.cell
+def _(NUM, pl, train):
+    # Matrice de corrélation (Spearman = sur les rangs, robuste aux revenus extrêmes)
+    import plotly.express as px
+
+    corr = train.select(NUM + ["defaut"]).drop_nulls().select(pl.all().rank()).corr()
+    px.imshow(corr.to_numpy(), x=corr.columns, y=corr.columns, text_auto=".2f",
+              color_continuous_scale="RdBu_r", zmin=-1, zmax=1, width=700, height=700)
+    return (corr,)
+
+
+@app.cell
+def _(corr, pl):
+    # a. Valeur numérique: filtre corrélation feature avec variable default
+
+
+    # Filtre si |corrélation avec défaut| >= 0.05
+    lien = (corr.select(pl.Series("variable", corr.columns), pl.col("defaut").round(3).alias("corr"))
+            .filter(pl.col("variable") != "defaut").sort(pl.col("corr").abs(), descending=True)
+            .with_columns((pl.col("corr").abs() >= 0.05).alias("gardee")))
+    print(f"Filtre 5 : {lien.height} -> {lien['gardee'].sum()} variables numériques")
+    lien
+    return (lien,)
+
+
+@app.cell
+def _(corr, lien, pl):
+    # a. Valeur numérique: filtre corrélation features entre elles : > 0.6 -> filtrer
+
+    gardees = lien.filter("gardee")["variable"].to_list()
+    paires = (corr.with_columns(pl.Series("a", corr.columns))
+              .unpivot(index="a", variable_name="b", value_name="corr")
+              .filter(pl.col("a").is_in(gardees), pl.col("b").is_in(gardees),
+                      pl.col("a") < pl.col("b"), pl.col("corr").abs() > 0.6))
+    print(f"{paires.height} paire(s) redondante(s)")
+    paires
+    return
+
+
+@app.cell
+def _(pl, train):
+    # b. Valeurs texte : on regarde si le taux de défaut change selon la réponse
+
+    # Nombre de prêts et % de défauts pour chaque réponse possible
+    # ignore les réponses vides et les catégories de moins de 1 000 prêts
+    def taux_defaut(colonne):
+        """Nombre de prêts et % de défauts pour chaque réponse possible"""
+        return (train.filter(pl.col(colonne).is_not_null())
+                .group_by(colonne)
+                .agg(pl.len().alias("prets"), (pl.col("defaut").mean() * 100).round(1).alias("defaut_%"))
+                .filter(pl.col("prets") >= 1000)
+                .sort("defaut_%"))
+
+    return (taux_defaut,)
+
+
+@app.cell
+def _(taux_defaut):
+    t_purpose = taux_defaut("purpose")
+    ecart_purpose = t_purpose["defaut_%"].max() - t_purpose["defaut_%"].min()
+    print(f"purpose : écart {ecart_purpose:.1f} points -> {'gardée' if ecart_purpose >= 3 else 'écartée'}")
+    t_purpose
+    return (ecart_purpose,)
+
+
+@app.cell
+def _(taux_defaut):
+    t_home = taux_defaut("home_ownership")
+    ecart_home = t_home["defaut_%"].max() - t_home["defaut_%"].min()
+    print(f"home_ownership : écart {ecart_home:.1f} points -> {'gardée' if ecart_home >= 3 else 'écartée'}")
+    t_home
+    return (ecart_home,)
+
+
+@app.cell
+def _(taux_defaut):
+    t_emp = taux_defaut("emp_length")
+    ecart_emp = t_emp["defaut_%"].max() - t_emp["defaut_%"].min()
+    print(f"emp_length : écart {ecart_emp:.1f} points -> {'gardée' if ecart_emp >= 3 else 'écartée'}")
+    t_emp
+    return (ecart_emp,)
+
+
+@app.cell
+def _(ecart_emp, ecart_home, ecart_purpose, pl):
+    # b. Valeurs texte : résumé
+
+    ecarts = pl.DataFrame({
+        "variable": ["purpose", "home_ownership", "emp_length"],
+        "ecart_pts": [round(ecart_purpose, 1), round(ecart_home, 1), round(ecart_emp, 1)],
+    }).with_columns((pl.col("ecart_pts") >= 3).alias("gardee"))
+    print(f"Filtre : {ecarts.height} -> {ecarts['gardee'].sum()} variables texte")
+    ecarts
+    return
+
+
+@app.cell
+def _(dico, pl):
+    # Sélection finale (résultat des filtres 5 et 6)
+
+    # Features données au modèle
+    FEATURES = ["fico", "annual_inc", "dti", "loan_to_income", "mort_acc",
+                "inq_last_6mths", "revol_util", "purpose", "home_ownership"]
+
+    # Colonnes que le chatbot demande au client
+    # (fico = moyenne de fico_range_low et fico_range_high ; 
+    # (loan_to_income = loan_amnt / annual_inc)
+    A_DEMANDER = ["loan_amnt", "annual_inc", "dti", "fico_range_low",
+                  "mort_acc", "inq_last_6mths", "revol_util", "purpose", "home_ownership"]
+
+    dico.filter(pl.col("colonne").is_in(A_DEMANDER)).select("colonne", "Justification")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 4. Model training
+    ### 4.a dataset spliting
     """)
     return
 
