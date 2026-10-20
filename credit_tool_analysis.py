@@ -322,7 +322,7 @@ def _(dico, pl):
                   "mort_acc", "inq_last_6mths", "revol_util", "purpose", "home_ownership"]
 
     dico.filter(pl.col("colonne").is_in(A_DEMANDER)).select("colonne", "Justification")
-    return
+    return (FEATURES,)
 
 
 @app.cell(hide_code=True)
@@ -332,6 +332,117 @@ def _(mo):
     ### 4.a dataset spliting
     """)
     return
+
+
+@app.cell
+def _(pl, prets_36):
+    # Prêts terminés, avec la cible et les features calculées
+    donnees = (prets_36
+        .filter(pl.col("loan_status").is_in(["Fully Paid", "Charged Off", "Default"]))
+        .with_columns(
+            (pl.col("loan_status") != "Fully Paid").cast(pl.Int8).alias("defaut"),            # 1 = défaut
+            ((pl.col("fico_range_low") + pl.col("fico_range_high")) / 2).alias("fico"),        # score FICO
+            (pl.col("loan_amnt") / pl.col("annual_inc").clip(lower_bound=1)).alias("loan_to_income"),
+        )
+        .to_pandas())
+
+    # Texte -> catégorie (LightGBM les gère directement)
+    donnees["purpose"] = donnees["purpose"].astype("category")
+    donnees["home_ownership"] = donnees["home_ownership"].astype("category")
+    return (donnees,)
+
+
+@app.cell
+def _(ANNEES, FEATURES, donnees, pl):
+    # Découpage par année : train, validation, test
+    train_df = donnees[donnees["annee"].isin(ANNEES["train"])]
+    val_df = donnees[donnees["annee"].isin(ANNEES["validation"])]
+    test_df = donnees[donnees["annee"].isin(ANNEES["test"])]
+
+    X_train, y_train = train_df[FEATURES], train_df["defaut"].to_numpy()
+    X_val, y_val = val_df[FEATURES], val_df["defaut"].to_numpy()
+    X_test, y_test = test_df[FEATURES], test_df["defaut"].to_numpy()
+
+    pl.DataFrame({
+        "jeu": ["train", "validation", "test"],
+        "prets": [len(y_train), len(y_val), len(y_test)],
+        "defaut_%": [round(y.mean() * 100, 1) for y in (y_train, y_val, y_test)],
+    })
+    return X_train, X_val, y_train, y_val
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 4.b LightGBM
+
+    Entraîné sur le train uniquement. Pas de `class_weight` : la probabilité de défaut doit rester réaliste.
+
+    Les paramètres sont choisis par la librairie optuna : 50 essais, chacun entraîné sur le train et noté par
+    l'AUC sur la validation 2014. Le test n'est pas utilisé ici.
+    """)
+    return
+
+
+@app.cell
+def _(X_train, X_val, pl, y_train, y_val):
+    # Recherche des paramètres : chaque essai = un modèle entraîné sur le train, noté sur la validation
+    import lightgbm as lgb
+    import optuna
+    from sklearn.metrics import roc_auc_score
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def objectif(trial):
+        """Un essai : des paramètres tirés par Optuna -> AUC sur la validation."""
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 50, 600),                      # nombre d'arbres
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),       # pas de chaque arbre
+            "num_leaves": trial.suggest_int("num_leaves", 8, 64),                            # taille des arbres
+            "min_child_samples": trial.suggest_int("min_child_samples", 20, 1000, log=True), # prêts min. par feuille
+        }
+        m = lgb.LGBMClassifier(**params, random_state=42, verbose=-1).fit(X_train, y_train)
+        return roc_auc_score(y_val, m.predict_proba(X_val)[:, 1])
+
+    etude = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    etude.optimize(objectif, n_trials=50)
+
+    print(f"Meilleure AUC validation : {etude.best_value:.4f} (essai {etude.best_trial.number} sur 50)")
+    pl.DataFrame([{"paramètre": k, "valeur": round(v, 4) if isinstance(v, float) else v}
+                  for k, v in etude.best_params.items()])
+    return etude, lgb, roc_auc_score
+
+
+@app.cell
+def _(etude, pl):
+    # Les 10 meilleurs essais : les bons paramètres se ressemblent-ils ?
+    pl.DataFrame([{"essai": t.number, "auc_val": round(t.value, 4), **t.params} for t in etude.trials]).sort(
+        "auc_val", descending=True).head(10)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Les meilleures convergent toutes vers des petits arbres, beaucoup de prêts par feuille
+    """)
+    return
+
+
+@app.cell
+def _(X_train, etude, lgb, y_train):
+    # Modèle final avec les meilleurs paramètres
+    modele = lgb.LGBMClassifier(**etude.best_params, random_state=42, verbose=-1)
+    modele.fit(X_train, y_train)
+    return (modele,)
+
+
+@app.cell
+def _(X_val, modele, roc_auc_score, y_val):
+    p_val = modele.predict_proba(X_val)[:, 1]   # probabilité de défaut de chaque prêt
+    auc_val = roc_auc_score(y_val, p_val)
+    print("AUC validation (2014) :", round(auc_val, 3), " (0,5 = hasard, 1 = classement parfait)")
+    return (p_val,)
 
 
 if __name__ == "__main__":
