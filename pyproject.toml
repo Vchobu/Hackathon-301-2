@@ -8,10 +8,12 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "fastexcel>=0.21.0",
     "joblib>=1.6.0",
     "marimo>=0.25.1",
     "numpy>=2.5.4",
     "pandas>=3.0.6",
+    "plotly>=7.1.0",
     "polars>=2.0.0",
     "pyarrow>=26.0.0",
     "scikit-learn>=1.9.1",
