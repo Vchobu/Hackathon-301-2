@@ -445,5 +445,97 @@ def _(X_val, modele, roc_auc_score, y_val):
     return (p_val,)
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 5. Seuil de décision (validation 2014)
+
+    Refus si la probabilité de défaut dépasse le seuil. Le seuil est celui qui maximise le F1 sur la validation.
+    """)
+    return
+
+
+@app.cell
+def _(p_val, y_val):
+    from sklearn.metrics import precision_recall_curve
+
+    _prec, _rec, _seuils = precision_recall_curve(y_val, p_val)
+    _f1 = 2 * _prec * _rec / (_prec + _rec + 1e-12)
+    SEUIL = float(_seuils[_f1[:-1].argmax()])
+    print(f"Seuil retenu : {SEUIL:.3f}  (refus si probabilité de défaut >= seuil)")
+    return (SEUIL,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 6. Sauvegarde et fonctions pour le chatbot
+
+    Le chatbot ne reçoit jamais la probabilité ni le seuil (le client ne doit pas pouvoir « viser » le seuil),
+    et une valeur manquante n'est jamais citée comme point fort ou faible.
+    """)
+    return
+
+
+@app.cell
+def _(FEATURES, SEUIL, X_train, modele):
+    import os        # pour créer le dossier
+    import joblib    # pour écrire le fichier
+
+    CHEMIN_MODELE = "output/modele_credit.joblib"
+    ARTEFACT = {
+        "modele": modele,   # le LightGBM entrainé: proba de défaut
+        "seuil": SEUIL,     # e.g. 0.139 : au-dessus, refus
+        "features": FEATURES,  # les 9 features, dans l'ordre attendu par le modèle
+        "categories": {c: list(X_train[c].cat.categories) for c in ["purpose", "home_ownership"]},
+        # les valeurs possibles de purpose et home_ownership
+    }
+    os.makedirs("output", exist_ok=True)
+    joblib.dump(ARTEFACT, CHEMIN_MODELE)
+    print("Modèle sauvegardé :", CHEMIN_MODELE)
+    return (CHEMIN_MODELE,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 7. Example 101 d'utilisation du modèle par le chatbot
+
+    Le chatbot :
+    1. charge le modèle sauvegardé (`ct.charger_modele`) ;
+    2. envoie les réponses du client à `ct.score_loan`, qui renvoie la décision, les points forts et les points faibles ;
+    3. en cas de refus, il appelle `ct.montant_max` pour proposer un montant plus petit.
+
+    Notes sur les valeurs manquantes :
+    - Champs obligatoires : loan_amnt et annual_inc
+    - une valeur absente n’est jamais citée comme point fort ou faible, puisqu’on ne la connaît pas ;
+    - la décision est moins fiable avec peu d’informations. Le chatbot doit donc essayer d’obtenir un maximum de réponses avant d’appeler l’outil
+    """)
+    return
+
+
+@app.cell
+def _(CHEMIN_MODELE, ct):
+    # Les fonctions du chatbot sont dans credit_tool.py : on recharge le modèle comme le fera le chatbot
+    art = ct.charger_modele(CHEMIN_MODELE)
+    # Exemple :  client  demande 25 000 avec 45 000 de revenu
+    exemple = {"loan_amnt": 25000, "annual_inc": 45000, "mensualites_dettes": 900, "fico": 675,
+               "mort_acc": 0, "inq_last_6mths": 2, "revol_util": 80,
+               "purpose": "debt_consolidation", "home_ownership": "RENT"}
+    resultat = ct.score_loan(exemple, art)
+    if resultat["decision"] == "refus":
+        resultat |= ct.montant_max(exemple, art)
+    resultat
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## TODO meilleure gestion des valeurs manquantes
+    """)
+    return
+
+
 if __name__ == "__main__":
     app.run()
