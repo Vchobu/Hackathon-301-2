@@ -106,13 +106,77 @@ def _(etape4):
     candidats = etape4["colonne"].to_list()
     print(f"{len(candidats)} candidats :", candidats)
     etape4.select("colonne")
+    return (candidats,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 2. periodes disponibles, sélection et split (train, validation, test)
+    """)
+    return
+
+
+@app.cell
+def _(candidats, ct, pl):
+    # 1. Charger les prêts : date, statut, durée et les 15 candidats
+    prets = pl.read_csv(ct.DATA_PATH, columns=["issue_d", "loan_status", "term"] + candidats,
+                        infer_schema_length=200_000, ignore_errors=True)
+
+    # 2. Garder les prêts de 36 mois et ajouter l'année d'émission
+    # 36 et pas 60 car il ne resterait que 2012 et 2013 (pas 2014 et 2015) = pas assez de données
+    prets_36 = prets.filter(pl.col("term").str.contains("36")).with_columns(
+        pl.col("issue_d").str.strptime(pl.Date, "%b-%Y", strict=False).dt.year().alias("annee")
+    )
+    return (prets_36,)
+
+
+@app.cell
+def _(candidats, pl, prets_36):
+    # 3. Résumer par année
+    termine = pl.col("loan_status").is_in(["Fully Paid", "Charged Off", "Default"])
+    pire_manquant = pl.max_horizontal([pl.col(c).is_null().mean() for c in candidats])
+
+    par_annee = prets_36.group_by("annee").agg(
+        pl.len().alias("prets"),
+        (termine.mean() * 100).round(1).alias("termines_%"),       # part des prêts terminés
+        (pire_manquant * 100).round(1).alias("manquants_%"),       # pire candidat de l'année
+    ).sort("annee")
+    par_annee
+    return (par_annee,)
+
+
+@app.cell
+def _(par_annee, pl):
+    # Filtre A : prêts terminés fin 2018 (sinon on ne connaît pas encore le défaut = target)
+    periode_a = par_annee.filter(pl.col("termines_%") >= 99)
+    print(f"Filtre A : {par_annee.height} -> {periode_a.height} années")
+    par_annee.filter(pl.col("termines_%") < 99).select("annee", "termines_%")
+    return (periode_a,)
+
+
+@app.cell
+def _(periode_a, pl):
+    # Filtre B : variables manquantes (avant 2012, certaines colonnes n'existent pas)
+    periode_b = periode_a.filter(pl.col("manquants_%") <= 20)
+    print(f"Filtre B : {periode_a.height} -> {periode_b.height} années")
+    periode_a.filter(pl.col("manquants_%") > 20).select("annee", "manquants_%")
+    return (periode_b,)
+
+
+@app.cell
+def _(periode_b):
+    # Split temporel : dernière année = test, avant-dernière = validation, le reste = train
+    periode = periode_b["annee"].to_list()
+    ANNEES = {"train": periode[:-2], "validation": [periode[-2]], "test": [periode[-1]]}
+    ANNEES
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 2. periodes disponibles et sélection
+    ## 3. Analyse des features sélectionnées pour la période de train
     """)
     return
 
