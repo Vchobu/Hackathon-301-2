@@ -102,6 +102,12 @@ s'il n'en renvoie pas, oriente le client vers un conseiller.
 
 Sois concis : des messages courts, une seule question par message."""
 
+
+from contextlib import AsyncExitStack
+from langchain_mcp_adapters.tools import load_mcp_tools
+
+_PILE = AsyncExitStack()   # garde la session MCP ouverte tant que le programme tourne
+
 async def creer_agent():
     """Crée l'agent (LLM + outils MCP). Utilisé par le terminal et par GUI.py."""
     client = MultiServerMCPClient({
@@ -111,7 +117,8 @@ async def creer_agent():
             "args": ["run", "python", str(SERVEUR)],
         }
     })
-    tools = await client.get_tools()
+    session = await _PILE.enter_async_context(client.session("credit"))
+    tools = await load_mcp_tools(session)
     llm = init_chat_model(LLM_MODEL, temperature=0.0, reasoning=False)
     return create_agent(llm, tools, checkpointer=InMemorySaver(), system_prompt=CONSIGNES_LLM)
 
