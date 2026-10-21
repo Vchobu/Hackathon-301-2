@@ -1,0 +1,26 @@
+{
+  "num": [
+    "fico_range_low",
+    "fico_range_high",
+    "dti",
+    "annual_inc",
+    "inq_last_6mths",
+    "revol_util",
+    "loan_amnt"
+  ],
+  "cat": [
+    "home_ownership",
+    "purpose"
+  ],
+  "justification": {
+    "fico_range_low": "corr. -0.109 avec le défaut",
+    "fico_range_high": "avec fico_range_low, donne la feature fico",
+    "dti": "corr. 0.082 avec le défaut",
+    "annual_inc": "corr. -0.071 avec le défaut",
+    "inq_last_6mths": "corr. 0.061 avec le défaut",
+    "revol_util": "corr. 0.061 avec le défaut",
+    "loan_amnt": "corr. 0.054 avec le défaut",
+    "home_ownership": "taux de défaut de 14.4 % à 17.5 % selon la catégorie",
+    "purpose": "taux de défaut de 11.2 % à 25.6 % selon la catégorie"
+  }
+}
