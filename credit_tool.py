@@ -125,6 +125,48 @@ def montant_max(demande: dict, art: dict, pas: int = 500, minimum: int = 1000) -
     return {"montant_max": None}                         # aucun montant accepté
 
 
+
+
+
+# ***********************************************************************************
+# mode d’emploi de l'outil
+# ***********************************************************************************
+
+# noms des features -> mots compréhensibles par le client
+LIBELLES = {
+    "fico": "votre historique de crédit (score FICO)",
+    "annual_inc": "votre revenu",
+    "loan_to_income": "le montant demandé par rapport à votre revenu",
+    "dti": "vos mensualités de crédit actuelles par rapport à votre revenu",
+    "inq_last_6mths": "vos demandes de crédit récentes",
+    "revol_util": "l'utilisation de vos cartes de crédit",
+    "mort_acc": "vos prêts immobiliers",
+    "purpose": "l'objet du prêt",
+    "home_ownership": "votre situation de logement",
+}
+
+# instructions données au LLM avec l'outil
+DESCRIPTION_OUTIL = (
+    "Pré-évalue une demande de prêt personnel de 36 mois. "
+    "Avant d'appeler l'outil, pose les questions au client une à une, en langage simple. "
+    "loan_amnt et annual_inc sont obligatoires ; pour les autres champs, si le client ne connaît pas "
+    "la réponse, n'envoie pas le champ : n'invente jamais de valeur et ne calcule rien toi-même. "
+    "L'outil renvoie : decision (accord ou refus), points_forts et points_faibles (déjà formulés pour "
+    "le client) et, en cas de refus, montant_max (montant plus petit qui serait accepté, ou null). "
+    "C'est le modèle qui décide : reformule sa décision, ne la change jamais. "
+    "Explique-la avec les points forts et faibles. En cas de refus, propose montant_max s'il existe, "
+    "sinon oriente vers un conseiller. Ne donne jamais de probabilité, de score ou de seuil. "
+    "Précise toujours qu'il s'agit d'une pré-évaluation qu'un conseiller doit confirmer."
+)
+
+
+
+
+# champs obligatoires
+OBLIGATOIRES = ["loan_amnt", "annual_inc"]
+
+
+
 # ******************************************************************
 # commandes à exécuter: point d'entrée du chatbot
 # modèle chargé une seule fois, au premier appel
@@ -155,3 +197,4 @@ def outil_credit(arguments: dict) -> dict:
     if resultat["decision"] == "refus":
         resultat |= montant_max(arguments, _ART)
     return resultat
+
