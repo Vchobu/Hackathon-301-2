@@ -124,3 +124,34 @@ def montant_max(demande: dict, art: dict, pas: int = 500, minimum: int = 1000) -
 
     return {"montant_max": None}                         # aucun montant accepté
 
+
+# ******************************************************************
+# commandes à exécuter: point d'entrée du chatbot
+# modèle chargé une seule fois, au premier appel
+_ART = None
+
+def outil_credit(arguments: dict) -> dict:
+    """Seule fonction appelée par le chatbot (Python direct ou mcp_credit.py).
+    Input : arguments envoyés par le LLM (dict, clés de PARAMETRES).
+    Output : decision, points_forts et points_faibles en mots pour le client, montant_max en cas de refus."""
+    # 1. Charger l'artfact du modèle une seule fois
+    global _ART
+    if _ART is None:
+        _ART = charger_modele()
+
+    # 2. Sans montant ou sans revenu, on ne peut pas calculer : le LLM doit les demander
+    manquants = [c for c in OBLIGATOIRES if arguments.get(c) is None]
+    if manquants:
+        return {"erreur": f"Champs obligatoires manquants : {manquants}. Demande-les au client."}
+
+    # 3. Décision du modèle, avec les points forts et faibles (noms techniques)
+    resultat = score_loan(arguments, _ART)
+
+    # 4. Noms techniques -> mots pour le client
+    resultat["points_forts"] = [LIBELLES[f] for f in resultat["points_forts"]]
+    resultat["points_faibles"] = [LIBELLES[f] for f in resultat["points_faibles"]]
+
+    # 5. En cas de refus : ajouter le plus grand montant acceptable
+    if resultat["decision"] == "refus":
+        resultat |= montant_max(arguments, _ART)
+    return resultat
