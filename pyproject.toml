@@ -8,10 +8,14 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "langchain>=1.4.6",
+    "langchain-ollama>=1.1.0",
+    "marimo>=0.25.1",
+    "nicegui>=3.18.0",
+    "ollama>=0.6.3",
     "fastexcel>=0.21.0",
     "joblib>=1.6.0",
     "lightgbm>=4.7.0",
-    "marimo>=0.25.1",
     "numpy>=2.5.4",
     "optuna>=5.0.0",
     "pandas>=3.0.6",
