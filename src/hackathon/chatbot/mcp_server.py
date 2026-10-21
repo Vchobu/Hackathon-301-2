@@ -57,7 +57,7 @@ def evaluer_credit(profil: dict) -> dict:
         client = pd.DataFrame([ligne])[MODEL.feature_name_]
         for col, cats in CATEGORIES.items():
             client[col] = pd.Categorical(client[col], categories=cats)
-        proba = float(MODEL.predict_proba(client)[0, 1])
+        oba = float(MODEL.predict_proba(client)[0, 1])
     except Exception as e:                                     # filet de sécurité final
         return {"erreur": f"Échec de la prédiction : {e}", "erreurs": erreurs}
 
