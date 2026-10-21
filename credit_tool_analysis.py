@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.25.1"
+__generated_with = "0.25.2"
 app = marimo.App(width="medium")
 
 
@@ -378,7 +378,7 @@ def _(mo):
 
     Entraîné sur le train uniquement. Pas de `class_weight` : la probabilité de défaut doit rester réaliste.
 
-    Les paramètres sont choisis par la librairie optuna : 50 essais, chacun entraîné sur le train et noté par
+    Les paramètres sont choisis par la librairie **optuna** : 50 essais, chacun entraîné sur le train et noté par
     l'AUC sur la validation 2014. Le test n'est pas utilisé ici.
     """)
     return
@@ -516,7 +516,7 @@ def _(mo):
 
 @app.cell
 def _(CHEMIN_MODELE, ct):
-    # Les fonctions du chatbot sont dans credit_tool.py : on recharge le modèle comme le fera le chatbot
+    # Les fonctions du chatbot sont dans credit_tool.py : ici on recharge le modèle comme fera le chatbot
     art = ct.charger_modele(CHEMIN_MODELE)
     # Exemple :  client  demande 25 000 avec 45 000 de revenu
     exemple = {"loan_amnt": 25000, "annual_inc": 45000, "mensualites_dettes": 900, "fico": 675,
