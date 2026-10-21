@@ -1,4 +1,14 @@
-from nicegui import run, ui
+import uuid
+from nicegui import app, run, ui
+from hackathon.chatbot.agent import creer_agent, ACCUEIL
+
+AGENT = None
+
+async def demarrer_agent():
+    global AGENT
+    AGENT = await creer_agent()      # créé une seule fois, au lancement du serveur web
+
+app.on_startup(demarrer_agent)
 
 ui.add_head_html(
     """
@@ -77,7 +87,9 @@ def chat_page() -> None:
         chat_window = ui.column().classes("chat-window w-full gap-3")
         with chat_window:
             ui.label(
-                "Hello! I am a credit assistant. I can help collect the information needed for a preliminary credit assessment. How can I help you today?"
+                #"Hello! I am a credit assistant. I can help collect the information needed for a preliminary credit assessment. How can I help you today?"
+                ACCUEIL
+
             ).classes("message message-assistant")
         with chat_window:
             typing_indicator = ui.html(
@@ -93,6 +105,7 @@ def chat_page() -> None:
             send_button = ui.button("Send", icon="send").classes("h-14")
 
         is_waiting = False
+        thread_id = str(uuid.uuid4())   # une conversation séparée par onglet du navigateur
         conversation_history: list[tuple[str, str]] = []
 
     def add_message(text: str, sender: str) -> None:
@@ -117,9 +130,11 @@ def chat_page() -> None:
         typing_indicator.set_visibility(True)
 
         try:
-            answer = await run.io_bound(
-                YOUR_AI_HERE, question, conversation_history.copy()
+            reponse = await AGENT.ainvoke(
+                {"messages": [{"role": "user", "content": question}]},
+                {"configurable": {"thread_id": thread_id}},
             )
+            answer = reponse["messages"][-1].content   # dernier message = réponse de l'agent
             conversation_history.append((question, answer))
             add_message(answer or "Model did not return a text response.", "assistant")
         except Exception as error:
