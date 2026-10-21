@@ -5,71 +5,49 @@ Test      : uv run mcp dev src/hackathon/chatbot/mcp_server.py
 
 """
 
+import sys
+from pathlib import Path
+
+RACINE = Path(__file__).resolve().parents[3]   # src/hackathon/chatbot → racine du projet
+if str(RACINE) not in sys.path:
+    sys.path.insert(0, str(RACINE))
+
+from mcp.server.fastmcp import FastMCP
+from credit_tool import outil_credit
+from hackathon.chatbot.parameters import LLM_MODEL
 import pandas as pd
 from mcp.server.fastmcp import FastMCP
 
-from hackathon.chatbot.utils import CATEGORIES, MODEL, SCHEMA, SEUIL, verifier
+from credit_tool import outil_credit
 
 mcp = FastMCP("credit")
 
 
 @mcp.tool()
-def get_model_features() -> dict:
-    """Renvoie les features attendues par le modèle de crédit, avec leur type et leurs valeurs possibles.
-
-    Pour une feature numérique : [min, max] observés à l'entraînement.
-    Pour une feature catégorielle : la liste des valeurs acceptées.
-    """
-    return SCHEMA
-
-
-@mcp.tool()
 def evaluer_credit(profil: dict) -> dict:
-    """Évalue si une demande de crédit peut être accordée à partir du profil de l'emprunteur.
+    """Évalue une demande de crédit à partir du profil du client et renvoie la décision du modèle.
 
-    Appeler d'abord get_model_features pour connaître les features attendues.
-    Les features inconnues ou de mauvais type sont ignorées et signalées dans la réponse.
-    Les features absentes sont traitées comme manquantes par le modèle.
+    Quand l'appeler : une seule fois que toutes les informations ont été recueillies auprès du client
+    (ou que le client a indiqué ne pas connaître certaines informations facultatives).
 
-    Args:
-        profil: dictionnaire {nom_de_feature: valeur} décrivant l'emprunteur.
+    Entrée :
+        arguments : dictionnaire {nom_technique: valeur} avec les informations du client.
+            - Utiliser exactement les noms techniques donnés dans tes consignes.
+            - Le montant demandé et le revenu sont obligatoires.
+            - N'inclure une information facultative que si le client l'a donnée : ne jamais inventer de valeur.
+            - Les valeurs numériques sont des nombres (pas de texte comme "3000 $").
+
+    Sortie :
+        - decision : "accord" ou "refus".
+        - points_forts : éléments du profil qui jouent en faveur du client, déjà formulés pour lui.
+        - points_faibles : éléments du profil qui jouent en sa défaveur, déjà formulés pour lui.
+        - montant_max : uniquement en cas de refus, plus grand montant qui serait accepté
+          avec le même profil. À proposer au client comme alternative.
+        - erreur : présent uniquement si l'évaluation est impossible (ex. information obligatoire
+          manquante). Dans ce cas, demander au client les informations indiquées puis rappeler l'outil.
     """
-    erreurs, avertissements = [], []
-    ligne = {nom: float("nan") for nom in MODEL.feature_name_}   # tout « manquant » au départ
 
-    for nom, valeur in profil.items():
-        if nom not in SCHEMA:
-            erreurs.append(f"{nom} : feature inconnue du modèle, ignorée")
-            continue
-        propre, err, avert = verifier(nom, valeur)
-        if err:
-            erreurs.append(err + ", ignorée")
-            continue
-        if avert:
-            avertissements.append(avert)
-        ligne[nom] = propre
-
-    manquantes = [n for n in MODEL.feature_name_ if pd.isna(ligne[n])]
-    if len(manquantes) == len(MODEL.feature_name_):
-        return {"erreur": "Aucune feature valide fournie, prédiction impossible.", "erreurs": erreurs}
-
-    try:
-        client = pd.DataFrame([ligne])[MODEL.feature_name_]
-        for col, cats in CATEGORIES.items():
-            client[col] = pd.Categorical(client[col], categories=cats)
-        oba = float(MODEL.predict_proba(client)[0, 1])
-    except Exception as e:                                     # filet de sécurité final
-        return {"erreur": f"Échec de la prédiction : {e}", "erreurs": erreurs}
-
-    return {
-        "accorde": bool(proba < SEUIL),    # bool() : un np.bool_ ne passe pas en JSON
-                                           # à inverser si la classe 1 = « remboursé »
-        "proba_defaut": round(proba, 3),
-        "seuil": round(SEUIL, 3),
-        "features_manquantes": manquantes,
-        "erreurs": erreurs,
-        "avertissements": avertissements,
-    }
+    return outil_credit(profil)
 
 
 if __name__ == "__main__":
