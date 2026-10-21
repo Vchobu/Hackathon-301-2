@@ -1,0 +1,1 @@
+LLM_MODEL = "ollama:qwen3.5:4b"
