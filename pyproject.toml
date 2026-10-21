@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "dotenv>=0.9.9",
     "langchain>=1.4.6",
     "langchain-ollama>=1.1.0",
     "marimo>=0.25.1",
@@ -15,7 +16,13 @@ dependencies = [
     "ollama>=0.6.3",
     "fastexcel>=0.21.0",
     "joblib>=1.6.0",
+    "kagglehub>=1.0.2",
+    "langchain>=1.4.6",
+    "langchain-mcp-adapters>=0.3.2",
+    "langchain-ollama>=1.1.0",
     "lightgbm>=4.7.0",
+    "marimo>=0.25.1",
+    "mcp[cli]>=1.30.0",
     "numpy>=2.5.4",
     "optuna>=5.0.0",
     "pandas>=3.0.6",
