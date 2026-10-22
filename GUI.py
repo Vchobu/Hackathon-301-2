@@ -82,12 +82,11 @@ ui.add_head_html(
 @ui.page("/")
 def chat_page() -> None:
     with ui.column().classes("w-full max-w-4xl mx-auto p-4 gap-4"):
-        ui.label("Chat with our AI").classes("text-2xl font-bold")
+        ui.label("Credit assistant").classes("text-2xl font-bold")
 
         chat_window = ui.column().classes("chat-window w-full gap-3")
         with chat_window:
             ui.label(
-                #"Hello! I am a credit assistant. I can help collect the information needed for a preliminary credit assessment. How can I help you today?"
                 ACCUEIL
 
             ).classes("message message-assistant")
@@ -99,8 +98,8 @@ def chat_page() -> None:
 
         with ui.row().classes("w-full items-end gap-2"):
             message_input = ui.textarea(
-                label="Your question",
-                placeholder="Message...",
+                label="Your message",
+                placeholder="Type your message...",
             ).classes("flex-1")
             send_button = ui.button("Send", icon="send").classes("h-14")
 
@@ -136,7 +135,7 @@ def chat_page() -> None:
             )
             answer = reponse["messages"][-1].content   # dernier message = réponse de l'agent
             conversation_history.append((question, answer))
-            add_message(answer or "Model did not return a text response.", "assistant")
+            add_message(answer or "The assistant did not return a text response.", "assistant")
         except Exception as error:
             error_message = f"Failed to get response: {error}"
             add_message(error_message, "assistant")

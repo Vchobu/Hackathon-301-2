@@ -51,7 +51,11 @@ def colonnes_disponibles(path: str = DATA_PATH) -> list[str]:
 
 def charger_modele(path: str = MODELE_PATH) -> dict:
     """contient Modèle LightGBM, seuil, liste des features et catégories"""
-    return joblib.load(path)
+    art = joblib.load(path)
+    modele = art["modele"]
+    if hasattr(modele, "set_params"):
+        modele.set_params(n_jobs=1)
+    return art
 
 def vers_features(demande: dict, art: dict) -> pd.DataFrame:
     """ Input : réponses du client (dict) et artefact du modèle.
@@ -114,15 +118,29 @@ def montant_max(demande: dict, art: dict, pas: int = 500, minimum: int = 1000) -
     """En cas de refus : on test des montants d'emprunt plus faible
      (par pas de 500 $) que le modèle accepterait
      ou None si aucun montant ne passe avec les valeurs du client"""
-    montant = demande["loan_amnt"] - pas                 # premier essai : 500 $ de moins
+    premier_montant = demande["loan_amnt"] - pas
+    if premier_montant < minimum:
+        return {"montant_max": None}
 
-    while montant >= minimum:
-        demande_reduite = {**demande, "loan_amnt": montant}   # reprend la demande avec un montant plus petit
-        if score_loan(demande_reduite, art)["decision"] == "accord":
-            return {"montant_max": montant}              # si ça passe on retourne ce montant
-        montant -= pas                                   # sinon, on continue la boucle (-500 $)
+    nombre_candidats = (premier_montant - minimum) // pas + 1
+    gauche, droite = 0, nombre_candidats - 1
+    meilleur = None
 
-    return {"montant_max": None}                         # aucun montant accepté
+    # The risk increases with the loan amount through loan_to_income, so the
+    # accepted amounts form a lower range of the candidate amounts.
+    while gauche <= droite:
+        milieu = (gauche + droite) // 2
+        montant = premier_montant - milieu * pas
+        X = vers_features({**demande, "loan_amnt": montant}, art)
+        probabilite = art["modele"].predict_proba(X)[0, 1]
+
+        if probabilite < art["seuil"]:
+            meilleur = montant
+            droite = milieu - 1
+        else:
+            gauche = milieu + 1
+
+    return {"montant_max": meilleur}                     # aucun montant accepté si None
 
 
 
@@ -244,4 +262,3 @@ def outil_credit(arguments: dict) -> dict:
     if resultat["decision"] == "refus":
         resultat |= montant_max(arguments, _ART)
     return resultat
-

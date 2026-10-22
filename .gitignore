@@ -11,3 +11,4 @@ wheels/
 .venv
 .python-version
 data/
+.env
