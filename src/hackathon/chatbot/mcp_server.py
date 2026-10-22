@@ -4,9 +4,14 @@ Lancement : uv run python -m hackathon.chatbot.mcp_server
 Test      : uv run mcp dev src/hackathon/chatbot/mcp_server.py
 
 """
-
+import anyio
 import sys
 from pathlib import Path
+import os
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 RACINE = Path(__file__).resolve().parents[3]   # src/hackathon/chatbot → racine du projet
 if str(RACINE) not in sys.path:
@@ -17,10 +22,26 @@ from credit_tool import outil_credit
 from hackathon.chatbot.parameters import LLM_MODEL
 import pandas as pd
 from mcp.server.fastmcp import FastMCP
-
-from credit_tool import outil_credit
+import credit_tool
+from credit_tool import outil_credit, charger_modele, _ART
 from typing import Literal
 from pydantic import BaseModel, Field, model_validator
+import json
+import faulthandler
+
+_TRACE = open(RACINE / "mcp_traceback.log", "w", encoding="utf-8")
+
+
+import logging
+
+logging.basicConfig(
+    filename=RACINE / "mcp_server.log",          # à la racine du projet
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    encoding="utf-8",
+)
+log = logging.getLogger("mcp")
+log.info("serveur démarré")
 
 mcp = FastMCP("credit")
 
@@ -52,10 +73,11 @@ class Profil(BaseModel):
                     "Corrige les noms et rappelle l'outil."
                 )
         return data
- 
+
+credit_tool._ART = credit_tool.charger_modele()
 
 @mcp.tool()
-def evaluer_credit(profil: Profil) -> dict:
+async def evaluer_credit(profil: Profil) -> dict:
     """Évalue une demande de crédit à partir du profil du client et renvoie la décision du modèle.
 
     Quand l'appeler : une seule fois, quand toutes les informations ont été recueillies auprès du client
@@ -78,12 +100,17 @@ def evaluer_credit(profil: Profil) -> dict:
     """
 
     arguments = profil.model_dump(exclude_none=True)   # objet Pydantic → dict, sans les champs vides
-    print("[MCP] evaluer_credit reçoit :", arguments, file=sys.stderr)
-    resultat = outil_credit(arguments)
-    print("[MCP] evaluer_credit renvoie :", resultat, file=sys.stderr)
-
-
-    return outil_credit(profil.model_dump(exclude_none=True))
+    log.info("evaluer_credit reçoit : %s", arguments)
+    faulthandler.dump_traceback_later(200, file=_TRACE)   # si ça dure plus de 200 s : écrit où ça bloque
+    try:
+        resultat = outil_credit(arguments)
+    except Exception:
+        log.exception("evaluer_credit a planté")   # écrit l'erreur complète (traceback) dans le log
+        raise                                      # l'erreur est quand même renvoyée au LLM
+    finally:
+        faulthandler.cancel_dump_traceback_later()        # fini à temps : on annule
+    log.info("evaluer_credit renvoie : %s", resultat)
+    return resultat
 
 
 if __name__ == "__main__":
