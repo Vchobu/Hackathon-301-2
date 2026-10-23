@@ -27,6 +27,8 @@ import json
 from langchain.agents.middleware import ModelRequest, dynamic_prompt, wrap_model_call
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from hackathon.chatbot.journal import compteur, court, log, resume   # journal des flux (flux.log)
+
 # Remplis par configurer() à partir du schéma de evaluer_credit
 ORDRE: list[str] = []            # ordre des questions (obligatoires d'abord)
 DESCRIPTIONS: dict[str, str] = {}
@@ -49,6 +51,8 @@ def configurer(tools) -> None:
     ORDRE[:] = OBLIGATOIRES + [c for c in champs if c not in OBLIGATOIRES]
     DESCRIPTIONS.clear()
     DESCRIPTIONS.update(champs)
+    log.info(f"configurer : ORDRE = {ORDRE}")
+    log.info(f"configurer : OBLIGATOIRES = {OBLIGATOIRES}")
 
 
 # ***********************************************************************************
@@ -70,33 +74,47 @@ def _reussi(m) -> bool:
 def profil_courant(messages) -> tuple[dict, list[str]]:
     """Reconstruit le profil en rejouant, dans l'ordre, les résultats réussis de noter_reponse."""
     profil, inconnus = {}, []
-    for m in messages:
-        if not (isinstance(m, ToolMessage) and m.name == "noter_reponse" and _reussi(m)):
+    lus = []                                            # pour le journal : ce qui a été lu
+    for i, m in enumerate(messages):
+        if not (isinstance(m, ToolMessage) and m.name == "noter_reponse"):
+            continue
+        if not _reussi(m):
+            lus.append(f"#{i} ✗ erreur ignorée")
             continue
         try:
             r = json.loads(_texte(m))
         except json.JSONDecodeError:
+            lus.append(f"#{i} ✗ JSON illisible")
             continue
         champ = r.get("champ")
         if r.get("inconnu"):
             profil.pop(champ, None)
             if champ not in inconnus:
                 inconnus.append(champ)
+            lus.append(f"#{i} {champ} inconnu")
         elif champ:
             profil[champ] = r.get("valeur")
             if champ in inconnus:
                 inconnus.remove(champ)
+            lus.append(f"#{i} {champ}={r.get('valeur')}")
+    log.debug(f"      profil_courant : lit [{', '.join(lus) or 'aucun noter_reponse'}] "
+              f"→ profil={profil}, inconnus={inconnus}")
     return profil, inconnus
 
 
 def _apres_evaluation(messages) -> bool:
     """True si evaluer_credit a réussi ET qu'aucune réponse n'a été notée depuis
     (une correction après l'évaluation fait repasser à l'étape « profil complet » pour réévaluer)."""
-    for m in reversed(messages):
+    for i in range(len(messages) - 1, -1, -1):          # de la fin vers le début
+        m = messages[i]
         if isinstance(m, ToolMessage) and m.name == "noter_reponse" and _reussi(m):
+            log.debug(f"      _apres_evaluation : arrêt sur #{i} (noter_reponse réussi, plus récent "
+                      f"que toute évaluation) → False")
             return False
         if isinstance(m, ToolMessage) and m.name == "evaluer_credit":
+            log.debug(f"      _apres_evaluation : arrêt sur #{i} (evaluer_credit [{m.status}]) → {_reussi(m)}")
             return _reussi(m)
+    log.debug("      _apres_evaluation : aucune évaluation dans l'historique → False")
     return False
 
 
@@ -108,7 +126,14 @@ def _vient_de_noter(messages) -> bool:
         if not isinstance(m, ToolMessage):
             break
         fin.append(m)
-    return bool(fin) and all(m.name == "noter_reponse" and _reussi(m) for m in fin)
+    resultat = bool(fin) and all(m.name == "noter_reponse" and _reussi(m) for m in fin)
+    if fin:
+        log.debug(f"      _vient_de_noter : ToolMessage de fin = [{'; '.join(resume(m) for m in reversed(fin))}] "
+                  f"→ {resultat}")
+    else:
+        log.debug(f"      _vient_de_noter : dernier message = {resume(messages[-1]) if messages else 'aucun'} "
+                  f"→ False")
+    return resultat
 
 
 def _appels_depuis_client(messages) -> int:
@@ -119,12 +144,15 @@ def _appels_depuis_client(messages) -> int:
             break
         if isinstance(m, AIMessage) and m.tool_calls:
             n += 1
+    log.debug(f"      _appels_depuis_client : {n} appel(s) d'outils depuis le dernier message du client")
     return n
 
 
 def _suivant(messages) -> str | None:
     profil, inconnus = profil_courant(messages)
-    return next((c for c in ORDRE if c not in profil and c not in inconnus), None)
+    suivant = next((c for c in ORDRE if c not in profil and c not in inconnus), None)
+    log.debug(f"      _suivant → {suivant}")
+    return suivant
 
 
 MAX_APPELS_PAR_TOUR = 6   # filet de sécurité : au-delà, l'agent doit répondre au client sans outil
@@ -159,9 +187,13 @@ Le profil du client a été évalué par l'outil evaluer_credit (voir son résul
 def prompt_selon_etape(request: ModelRequest) -> str:
     """Prompt court et adapté à l'étape : collecte (une question à la fois), appel, ou après évaluation."""
     messages = request.messages
+    compteur["appel"] += 1
+    log.info(f"── Appel du LLM n°{compteur['appel']} (tour {compteur['tour']}) ── "
+             f"prompt_selon_etape reçoit {len(messages)} messages · dernier : {resume(messages[-1])}")
 
     # Étape 3 : évaluation faite et rien de modifié depuis → expliquer la décision
     if _apres_evaluation(messages):
+        log.info("   prompt_selon_etape → étape APRÈS ÉVALUATION (annoncer la décision)")
         return CONSIGNES_APRES_EVALUATION
 
     profil, inconnus = profil_courant(messages)
@@ -169,10 +201,12 @@ def prompt_selon_etape(request: ModelRequest) -> str:
     if inconnus:
         deja += "\n" + "\n".join(f"- {c} : le client ne sait pas / refuse" for c in inconnus)
     suivant = next((c for c in ORDRE if c not in profil and c not in inconnus), None)
+    log.debug(f"      prompt_selon_etape : suivant = {suivant}  (premier champ de ORDRE ni noté ni inconnu)")
 
     # Étape 2 : profil complet → l'appel exact à faire
     if suivant is None:
         appel = json.dumps({"profil": {**profil, "inconnus": inconnus}}, ensure_ascii=False)
+        log.info(f"   prompt_selon_etape → étape PROFIL COMPLET : appel préparé evaluer_credit({court(appel, 250)})")
         return f"""{INTRO}
 
 Toutes les informations sont recueillies :
@@ -185,6 +219,7 @@ Appelle MAINTENANT l'outil evaluer_credit avec exactement ces arguments :
 
     # Étape 1b : la réponse vient d'être notée → UNIQUEMENT poser la question suivante
     if _vient_de_noter(messages):
+        log.info(f"   prompt_selon_etape → étape QUESTION : poser la question pour « {suivant} »")
         return f"""{INTRO}
 
 Informations DÉJÀ recueillies (ne les redemande JAMAIS) :
@@ -195,6 +230,8 @@ langage courant, pour obtenir : {DESCRIPTIONS[suivant]}{obligatoire}
 Tu peux donner un exemple de réponse. Ne répète pas les valeurs déjà données."""
 
     # Étape 1a : collecte, une seule information à la fois
+    log.info(f"   prompt_selon_etape → étape COLLECTE : information en cours « {suivant} » "
+             f"(noter la réponse du client ou poser la question)")
     return f"""{INTRO}
 
 Informations DÉJÀ recueillies (ne les redemande JAMAIS) :
@@ -260,9 +297,12 @@ def _outils_autorises(messages) -> set[str]:
                           Le LLM ne peut donc jamais construire lui-même un profil incomplet.
     """
     if _apres_evaluation(messages):
+        log.debug("      _outils_autorises → {noter_reponse}  (après évaluation : corrections seulement)")
         return {"noter_reponse"}
     if _suivant(messages) is None:
+        log.debug("      _outils_autorises → {evaluer_credit}  (profil complet)")
         return {"evaluer_credit"}
+    log.debug("      _outils_autorises → {noter_reponse}  (collecte)")
     return {"noter_reponse"}
 
 
@@ -282,13 +322,22 @@ async def historique_minimal(request: ModelRequest, handler):
     L'historique complet reste en mémoire (GUI, LangSmith, vérificateur).
     """
     messages = request.messages
+    log.debug("   historique_minimal : choix des messages et des outils…")
+
+    def envoyer(msgs, outils, raison):
+        noms = [getattr(t, "name", "?") for t in outils]
+        log.info(f"   historique_minimal → {raison} : {len(msgs)} message(s) sur {len(messages)}, "
+                 f"outils = {noms or 'AUCUN'}")
+        for m in msgs:
+            log.debug(f"      envoyé au LLM : {resume(m)}")
+        return request.override(messages=msgs, tools=outils)
 
     if _vient_de_noter(messages) and _suivant(messages) is not None:
-        return await handler(request.override(
-            messages=[HumanMessage("Pose la question suivante.")], tools=[]))
+        return await handler(envoyer([HumanMessage("Pose la question suivante.")], [],
+                                     "réponse notée, il reste une question"))
 
     utiles = _messages_utiles(messages)
     if _appels_depuis_client(messages) >= MAX_APPELS_PAR_TOUR:
-        return await handler(request.override(messages=utiles, tools=[]))
+        return await handler(envoyer(utiles, [], f"{MAX_APPELS_PAR_TOUR} appels d'outils atteints (anti-boucle)"))
     outils = _filtrer(request.tools, _outils_autorises(messages))
-    return await handler(request.override(messages=utiles, tools=outils))
+    return await handler(envoyer(utiles, outils, "messages utiles + outils de l'étape"))

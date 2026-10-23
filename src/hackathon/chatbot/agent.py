@@ -7,12 +7,7 @@ Le prompt n'est plus fixe : collecte.py le reconstruit avant chaque appel du LLM
 (une question à la fois, puis l'appel à evaluer_credit, puis l'annonce de la décision).
 """
 
-import sys
 from pathlib import Path
-
-RACINE = Path(__file__).resolve().parents[3]
-if str(RACINE) not in sys.path:
-    sys.path.insert(0, str(RACINE))
 
 import asyncio
 from contextlib import AsyncExitStack
@@ -27,9 +22,10 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.memory import InMemorySaver
 
 from hackathon.chatbot.collecte import configurer, historique_minimal, prompt_selon_etape
+from hackathon.chatbot.journal import (configurer_journal, debut_tour, fin_tour, journal_modele,
+                                       journal_outils, log)
 from hackathon.chatbot.parameters import LLM_MODEL
 
-VERIFICATEUR = False   # True : un second LLM contrôle chaque réponse (checker.py) — plus lent
 
 SERVEUR = Path(__file__).resolve().parent / "mcp_server.py"
 
@@ -40,6 +36,8 @@ _PILE = AsyncExitStack()   # garde la session MCP ouverte tant que le programme 
 
 async def creer_agent():
     """Crée l'agent (LLM + outils MCP). Utilisé par le terminal et par GUI.py."""
+    configurer_journal()             # flux.log à la racine (niveau DEBUG : tout le détail)
+    log.info(f"Lancement du serveur MCP : uv run python {SERVEUR.name}")
     client = MultiServerMCPClient({
         "credit": {
             "transport": "stdio",
@@ -49,17 +47,25 @@ async def creer_agent():
     })
     session = await _PILE.enter_async_context(client.session("credit"))   # serveur lancé une seule fois
     tools = await load_mcp_tools(session)
+    log.info(f"Session MCP ouverte · outils disponibles : {[t.name for t in tools]}")
     for t in tools:
         t.handle_tool_error = True   # une erreur de l'outil est renvoyée au LLM comme message, sans planter
 
     configurer(tools)                # lit noms, descriptions et obligatoires dans le schéma de evaluer_credit
 
-    middleware = [prompt_selon_etape, historique_minimal]   # l'ordre compte : prompt d'abord
-    if VERIFICATEUR:
-        from hackathon.chatbot.checker import verifier_reponse
-        middleware.append(verifier_reponse)
+    middleware = [
+        debut_tour,             # journal : début du tour (message du client)
+        prompt_selon_etape,     # choisit le prompt système de l'étape   ┐ l'ordre compte :
+        historique_minimal,     # choisit les messages et les outils      ┘ prompt d'abord
+        journal_modele,         # journal : ce que le LLM a répondu
+        journal_outils,         # journal : chaque appel d'outil MCP et son résultat
+        fin_tour,               # journal : fin du tour (réponse finale)
+    ]
+    log.info(f"Middlewares : {[m.name if hasattr(m, 'name') else type(m).__name__ for m in middleware]}")
+    
 
     llm = init_chat_model(LLM_MODEL, temperature=0.0, reasoning=False)
+    log.info(f"LLM : {LLM_MODEL} · agent prêt")
     return create_agent(llm, tools, checkpointer=InMemorySaver(), middleware=middleware)
 
 

@@ -26,6 +26,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 import faulthandler
 import logging
 import re
+import time
 import sys
 from pathlib import Path
 from typing import Annotated, Literal, Union, get_args
@@ -42,6 +43,11 @@ logging.basicConfig(
     encoding="utf-8",
 )
 log = logging.getLogger("mcp")
+# Les mêmes messages vont aussi dans flux.log (partagé avec l'agent), préfixés [serveur]
+_flux = logging.FileHandler(RACINE / "flux.log", encoding="utf-8")
+_flux.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d [serveur] %(message)s", "%H:%M:%S"))
+_flux.addFilter(lambda r: r.name == "mcp")      # seulement nos messages (pas « Processing request… »)
+logging.getLogger().addHandler(_flux)
 log.info("serveur démarré")
 
 # 2. Le .env : le serveur ne reçoit pas les variables d'environnement de l'agent
@@ -120,7 +126,10 @@ class Profil(BaseModel):
         """Champs obligatoires absents (ou null) : message clair avec leur description."""
         if isinstance(data, dict):
             manquants = [c for c in OBLIGATOIRES if data.get(c) is None]
+            if not manquants:
+                log.info("   Profil (validation 2/3) : champs obligatoires présents → OK")
             if manquants:
+                log.info("   Profil (validation 2/3) : obligatoires manquants %s → refus", manquants)
                 champs = cls.model_fields
                 liste = "\n".join(f"- {c} : {champs[c].description}" for c in manquants)
                 raise ValueError(
@@ -135,6 +144,7 @@ class Profil(BaseModel):
         """Noms de champs inventés (ex. "fico_score") : refusés, avec la liste des noms valides."""
         if isinstance(data, dict):
             inconnus = [k for k in data if k not in cls.model_fields]
+            log.info("   Profil (validation 1/3) : noms de champs %s", f"inconnus {inconnus} → refus" if inconnus else "OK")
             if inconnus:
                 raise ValueError(
                     f"Champs inconnus : {inconnus}. "
@@ -148,6 +158,8 @@ class Profil(BaseModel):
         champs = type(self).model_fields
         oublies = [c for c in get_args(Facultatif)
                    if getattr(self, c) is None and c not in self.inconnus]
+        log.info("   Profil (validation 3/3, après les types) : %s",
+                 f"questions oubliées {oublies} → refus" if oublies else "toutes les questions ont une réponse → OK")
         if oublies:
             liste = "\n".join(f"- {c} : {champs[c].description}" for c in oublies)
             raise ValueError(
@@ -200,32 +212,38 @@ def noter_reponse(champ: Champ, valeur: float | str | None = None, inconnu: bool
     - inconnu : true si le client ne connaît pas l'information ou refuse de la donner (valeur vide).
     Si la valeur est invalide, l'erreur explique pourquoi : corrige-la ou redemande-la au client.
     """
+    log.info("noter_reponse(champ=%s, valeur=%r, inconnu=%s, par_mois=%s)", champ, valeur, inconnu, par_mois)
     if inconnu:
         if champ in OBLIGATOIRES:
+            log.info("   %s est obligatoire : « inconnu » refusé", champ)
             raise ValueError(f"{champ} est obligatoire : explique au client qu'elle est indispensable "
                              "pour évaluer sa demande, puis redemande-la.")
-        log.info("noter_reponse : %s inconnu", champ)
+        log.info("   → renvoie {champ: %s, inconnu: true}", champ)
         return {"champ": champ, "inconnu": True}
 
     if valeur is None or valeur == "":
+        log.info("   aucune valeur → refus")
         raise ValueError(f"Aucune valeur pour {champ}. Si le client ne sait pas, "
                          "rappelle noter_reponse avec inconnu=true.")
 
     description = Profil.model_fields[champ].description
     if champ not in ("purpose", "home_ownership"):    # nettoyage des nombres seulement : sinon
         valeur = _nettoyer_nombre(valeur)            # "home_improvement" perdrait son « _ »
+        log.info("   nettoyage du nombre → %r", valeur)
     if par_mois and champ == "annual_inc":           # conversion faite par le code, pas par le LLM
         try:
             valeur = float(valeur) * 12
+            log.info("   revenu mensuel × 12 → %r", valeur)
         except (TypeError, ValueError):
             pass                                     # la validation ci-dessous renverra l'erreur
     try:
         propre = _validateur(champ).validate_python(valeur)
     except ValidationError as e:
+        log.info("   validation refusée : %s", e.errors()[0]["msg"])
         raise ValueError(f"Valeur invalide pour {champ} ({description}) : {e.errors()[0]['msg']}. "
                          "Corrige-la, ou redemande-la au client.") from None
 
-    log.info("noter_reponse : %s = %s", champ, propre)
+    log.info("   validé → renvoie {champ: %s, valeur: %r}", champ, propre)
     return {"champ": champ, "valeur": propre}
 
 
@@ -241,13 +259,18 @@ FICO_MIN = 662         # score FICO minimal vu à l'entraînement
 
 def evaluer(arguments: dict) -> dict:
     """outil_credit + règles pour les profils hors de ce que le modèle a appris."""
+    debut = time.perf_counter()
     resultat = outil_credit(arguments)
+    log.info("   modèle (outil_credit) en %.2f s → décision %s, montant_max %s",
+             time.perf_counter() - debut, resultat.get("decision"), resultat.get("montant_max", "-"))
     if "decision" not in resultat:                    # erreur d'évaluation : on ne touche à rien
         return resultat
 
     alertes = []
     revenu = arguments["annual_inc"]
-    if arguments["loan_amnt"] / revenu > RATIO_MAX:
+    ratio = arguments["loan_amnt"] / revenu
+    log.info("   règle montant/revenu : %.3f %s %.4f", ratio, ">" if ratio > RATIO_MAX else "≤", RATIO_MAX)
+    if ratio > RATIO_MAX:
         # Refus imposé : le modèle n'a jamais vu de prêt aussi élevé par rapport au revenu.
         # Le montant maximal est cherché à partir du plafond (et plus du montant demandé : plus rapide).
         plafond = int(RATIO_MAX * revenu) // 500 * 500
@@ -256,7 +279,9 @@ def evaluer(arguments: dict) -> dict:
         resultat["points_forts"] = [p for p in resultat.get("points_forts", []) if p != libelle]
         resultat["points_faibles"] = [libelle] + [p for p in resultat.get("points_faibles", []) if p != libelle]
         resultat |= credit_tool.montant_max({**arguments, "loan_amnt": plafond + 500}, credit_tool._ART)
+        log.info("   → refus imposé, montant_max cherché sous le plafond %s → %s", plafond, resultat.get("montant_max"))
         alertes.append("montant supérieur à 71 % du revenu annuel : au-delà des dossiers connus du modèle")
+    log.info("   règle FICO : %s", arguments.get("fico", "inconnu"))
     if arguments.get("fico") is not None and arguments["fico"] < FICO_MIN:
         alertes.append("score de crédit inférieur aux profils connus du modèle : évaluation moins fiable")
     if alertes:
@@ -296,7 +321,7 @@ async def evaluer_credit(profil: Profil) -> dict:
           indiquées, puis rappeler l'outil.
     """
     arguments = profil.model_dump(exclude={"inconnus"}, exclude_none=True)
-    log.info("evaluer_credit reçoit : %s", arguments)
+    log.info("evaluer_credit : profil validé (3 validations OK) → %s", arguments)
     faulthandler.dump_traceback_later(200, file=_TRACE)   # si ça dure plus de 200 s : écrit où ça bloque
     try:
         # Calcul dans un thread : le serveur reste disponible pendant ce temps
@@ -324,15 +349,19 @@ def suggestions(resultat: dict, arguments: dict) -> dict:
     enrichi = {**resultat, "suggestions": [], "suggestions_texte": ""}
 
     if resultat.get("decision") != "refus":
+        log.info("   suggestions : pas de refus → pas de recherche")
         return enrichi
     montant = resultat.get("montant_max")
     purpose = arguments.get("purpose")
     if not TAVILY_KEY or not purpose or not montant:       # montant_max = None → rien de finançable
+        log.info("   suggestions : pas de recherche (clé Tavily %s, objet %s, montant_max %s)",
+                 "présente" if TAVILY_KEY else "absente", purpose, montant)
         return enrichi
 
     objet = purpose.replace("_", " ")                      # "home_improvement" → "home improvement"
     budget = f"{int(montant):,}"                           # 72000.0 → "72,000"
     requete = f"buy a {objet} in Switzerland for under {budget} dollars"
+    log.info("   suggestions : recherche Tavily « %s »", requete)
     try:
         reponse = requests.post(
             TAVILY_URL,
@@ -349,6 +378,8 @@ def suggestions(resultat: dict, arguments: dict) -> dict:
             for r in resultats
             if r.get("url") and r.get("score", 0) >= SCORE_MIN
         ][:3]
+        log.info("   suggestions : %d résultat(s) reçu(s), %d gardé(s) (score ≥ %.1f)",
+                 len(resultats), len(enrichi["suggestions"]), SCORE_MIN)
         enrichi["suggestions_texte"] = "\n".join(
             f"- [{s['titre']}]({s['url']})" for s in enrichi["suggestions"])
     except Exception:
