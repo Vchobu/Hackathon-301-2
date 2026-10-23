@@ -11,3 +11,9 @@ wheels/
 .venv
 .python-version
 data/
+
+# IDE
+.idea/
+
+# Clés API
+.env
