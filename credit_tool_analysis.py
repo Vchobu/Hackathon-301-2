@@ -448,9 +448,176 @@ def _(X_val, modele, roc_auc_score, y_val):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    ### 4.c Un AUC de 0.65, est-ce bien ?
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ####4c.1: Préparation du modèle de regression logistique
+    """)
+    return
+
+
+@app.cell
+def _(FEATURES):
+    import numpy as np
+    from sklearn.compose import ColumnTransformer
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
+
+    def regression_logistique():
+        """Régression logistique + préparation des données (LightGBM n'en a pas besoin)."""
+
+        # traitement par type de données
+        MONTANTS = ["annual_inc", "loan_to_income"]                  # très étalés -> log
+        TEXTE = ["purpose", "home_ownership"]                        # catégories -> colonnes 0/1
+        AUTRES = [f for f in FEATURES if f not in MONTANTS + TEXTE]  # fico, dti, mort_acc, ...
+
+        # pour les montants, on impute les médianes, prend le log et standardise
+        prep_montants = make_pipeline(
+            SimpleImputer(strategy="median"),     # manquant -> médiane
+            FunctionTransformer(np.log1p),        # log(1 + x)
+            StandardScaler(),                     # moyenne 0, écart-type 1
+        )
+
+        # pour les autres numériques manquantes (e.g. fico, dti), on prend la mediane et on l'indique et standardise
+        prep_autres = make_pipeline(
+            SimpleImputer(strategy="median", add_indicator=True),  # manquant -> médiane + colonne « était manquant »
+            StandardScaler(),
+        )
+
+        # pour les textes (purpose, home_ownership), on crée une colonne par catégorie
+        # catégories rares (< 1000 prêts) regroupées 
+        # catégorie inconnue après l'entrainement -> renvoie 0
+        prep_texte = OneHotEncoder(
+            min_frequency=1000,                   # catégories de moins de 1000 prêts regroupées
+            handle_unknown="ignore",              # catégorie jamais vue après l'entrainement -> on renvoie 0
+        )
+
+        # chaque groupe de colonnes reçoit sa préparation
+        preparation = ColumnTransformer([         
+            ("montants", prep_montants, MONTANTS),
+            ("autres", prep_autres, AUTRES),
+            ("texte", prep_texte, TEXTE),
+        ])
+
+        # construire le modèle: il sera utilisé par les fonctions .fit(X, y) et .predict_proba(X)
+        # max_iter=2000 : les coefficients sont trouvés par itérations successives
+        return make_pipeline(preparation, LogisticRegression(max_iter=2000))
+
+    return np, regression_logistique
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+ 
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### 4.c.2 Régression logistique contre LightGBM : validation croisée 5-fold
+    """)
+    return
+
+
+@app.cell
+def _(
+    X_train,
+    X_val,
+    etude,
+    lgb,
+    np,
+    pl,
+    regression_logistique,
+    roc_auc_score,
+    y_train,
+    y_val,
+):
+    # Validation croisée 5-fold sur 2012-2014, et AUC validation 2014 (même protocole que 4.b)
+    import pandas as pd
+    from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+    # on recolle train (2012-13) et validation (2014)
+    _X = pd.concat([X_train, X_val])
+    _y = np.concatenate([y_train, y_val])
+
+    # les deux modèles à comparer (pas encore entraînés)
+    _modeles = {
+        "LightGBM (paramètres Optuna)": lgb.LGBMClassifier(**etude.best_params, random_state=42, verbose=-1),
+        "Régression logistique": regression_logistique(),
+    }
+
+    # 5 plis, chacun avec le même taux de défaut
+    _plis = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    _lignes = []
+    for _nom, _modele in _modeles.items():
+        # CV : entraîné sur 4 plis, AUC sur le pli de validation, 5 fois
+        _aucs = cross_val_score(_modele, _X, _y, cv=_plis, scoring="roc_auc")
+
+        # même protocole que 4.b : entraîné sur 2012-13, évalué sur 2014
+        _modele.fit(X_train, y_train)
+        _auc_val = roc_auc_score(y_val, _modele.predict_proba(X_val)[:, 1])
+
+        _lignes.append({"modèle": _nom,
+                        "AUC CV moyenne": round(_aucs.mean(), 3),
+                        "écart-type": round(_aucs.std(), 3),
+                        "AUC validation 2014": round(_auc_val, 3)})
+    pl.DataFrame(_lignes)
+    return (pd,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **Lecture** (résultats obtenus : LightGBM 0.656 ± 0.003, régression logistique 0.652 ± 0.003) :
+
+    - l'écart-type est très faible : l'AUC de 0.65 est **stable**, ce n'est pas un hasard du découpage ;
+    - la régression logistique fait presque aussi bien : **la limite vient des 9 informations demandées au client**,
+      pas du choix du modèle. Un modèle plus complexe ne ferait pas beaucoup mieux avec ces données.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 4.d Importance des features (SHAP)
+
+    Contribution moyenne de chaque feature au risque de défaut, sur 20 000 prêts de validation.
+    Le chatbot utilise les mêmes valeurs pour les points forts et faibles du client.
+    """)
+    return
+
+
+@app.cell
+def _(FEATURES, X_val, modele, np, pl):
+    import plotly.express as _px
+
+    _contrib = modele.predict(X_val.sample(20_000, random_state=42), pred_contrib=True)[:, :-1]  # sans le biais
+    _importance = pl.DataFrame({"feature": FEATURES, "importance": np.abs(_contrib).mean(axis=0)}).sort("importance")
+    _px.bar(_importance.to_pandas(), x="importance", y="feature", orientation="h")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     ## 5. Seuil de décision (validation 2014)
 
     Refus si la probabilité de défaut dépasse le seuil. Le seuil est celui qui maximise le F1 sur la validation.
+
+    - Précision : parmi les prêts refusés, la part qui aurait vraiment fait défaut. Si elle est basse, on refuse beaucoup de bons clients.
+    - Recall : parmi tous les défauts, la part que le modèle refuse. Si il est bas, beaucoup de défauts passent.
     """)
     return
 
@@ -459,9 +626,10 @@ def _(mo):
 def _(p_val, y_val):
     from sklearn.metrics import precision_recall_curve
 
+    # essaie tous les seuils possibles, 
     _prec, _rec, _seuils = precision_recall_curve(y_val, p_val)
-    _f1 = 2 * _prec * _rec / (_prec + _rec + 1e-12)
-    SEUIL = float(_seuils[_f1[:-1].argmax()])
+    _f1 = 2 * _prec * _rec / (_prec + _rec + 1e-12)  # F1 : moyenne harmonique des deux
+    SEUIL = float(_seuils[_f1[:-1].argmax()])        # seuil qui donne le meilleur F1
     print(f"Seuil retenu : {SEUIL:.3f}  (refus si probabilité de défaut >= seuil)")
     return (SEUIL,)
 
@@ -469,7 +637,134 @@ def _(p_val, y_val):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 6. Sauvegarde et fonctions pour le chatbot
+    ## 6. Évaluation finale sur le test (2015)
+
+    On compare les modèles sur la **VAN** (valeur actuelle nette) de chaque prêt, taux 1%
+    (montant prêté + paiements reçus). Un prêt refusé a une VAN de 0.
+    """)
+    return
+
+
+@app.cell
+def _(ANNEES, X_train, ct, pd, pl):
+    # Prêts de test relus avec les colonnes nécessaires à la VAN (pas données au modèle!)
+    COLONNES_CLIENT = ["loan_amnt", "annual_inc", "dti", "fico_range_low", "fico_range_high",
+                       "mort_acc", "inq_last_6mths", "revol_util", "purpose", "home_ownership"]
+    COLONNES_VAN = ["funded_amnt", "total_pymnt", "recoveries", "collection_recovery_fee", "last_pymnt_d", "sub_grade"]
+
+    # 1. Prêts de 36 mois, terminés, émis l'année de test
+    test_2015 = (
+        pl.read_csv(ct.DATA_PATH, columns=["issue_d", "loan_status", "term"] + COLONNES_CLIENT + COLONNES_VAN,
+                    infer_schema_length=200_000, ignore_errors=True)
+        .with_columns(
+            pl.col("issue_d").str.strptime(pl.Date, "%b-%Y", strict=False).alias("debut"),
+            pl.col("last_pymnt_d").str.strptime(pl.Date, "%b-%Y", strict=False).alias("fin"),
+        )
+        .filter(
+            pl.col("term").str.contains("36"),
+            pl.col("debut").dt.year().is_in(ANNEES["test"]),
+            pl.col("loan_status").is_in(["Fully Paid", "Charged Off", "Default"]),
+        )
+    )
+
+    # 2. Cible et features, formatting comme en 4.a
+    test_2015 = test_2015.with_columns(
+        (pl.col("loan_status") != "Fully Paid").cast(pl.Int8).alias("defaut"),
+        ((pl.col("fico_range_low") + pl.col("fico_range_high")) / 2).alias("fico"),
+        (pl.col("loan_amnt") / pl.col("annual_inc").clip(lower_bound=1)).alias("loan_to_income"),
+    )
+
+    # 3. VAN de chaque prêt
+    TAUX_ACTU = 0.05                                  # obligations d’entreprises notées Baa, moyenne 2015
+    _r = (1 + TAUX_ACTU) ** (1 / 12) - 1              # taux mensuel
+
+    # a. Nombre de mois de paiement, entre l'émission et le dernier paiement (au moins 1)
+    test_2015 = test_2015.with_columns(
+        ((pl.col("fin").dt.year() - pl.col("debut").dt.year()) * 12
+         + pl.col("fin").dt.month() - pl.col("debut").dt.month()).fill_null(1).clip(1).alias("mois")
+    )
+
+    # b. Facteur d'actualisation : valeur aujourd'hui d'1 $ reçu au dernier mois
+    test_2015 = test_2015.with_columns(((1 + _r) ** -pl.col("mois")).alias("actu"))
+
+    # c. Argent reçu : payé par le client, et récupéré après un défaut (moins les frais de recouvrement)
+    test_2015 = test_2015.with_columns(
+        (pl.col("total_pymnt") - pl.col("recoveries")).alias("paye"),
+        (pl.col("recoveries") - pl.col("collection_recovery_fee")).alias("recupere"),
+    )
+
+    # d. VAN = - montant prêté + mensualités actualisées + recouvrement actualisé
+    test_2015 = test_2015.with_columns(
+        (-pl.col("funded_amnt")
+         + pl.col("paye") / pl.col("mois") * (1 - pl.col("actu")) / _r
+         + pl.col("recupere") * pl.col("actu")).alias("van")
+    )
+
+    # 4. Note de la banque en rang : A1 = 0 (sûr) ... G5 = 34 (risqué)
+    _notes = [f"{lettre}{chiffre}" for lettre in "ABCDEFG" for chiffre in range(1, 6)]
+    test_2015 = test_2015.with_columns(pl.col("sub_grade").replace_strict(_notes, list(range(35))).alias("note_lc"))
+
+    # 5. Pandas, avec les mêmes catégories que le train
+    test_2015 = test_2015.to_pandas()
+    for _c in ["purpose", "home_ownership"]:
+        test_2015[_c] = pd.Categorical(test_2015[_c], categories=X_train[_c].cat.categories)
+
+    print(f"Test {ANNEES['test']} : {len(test_2015)} prêts, {test_2015['defaut'].mean() * 100:.1f} % de défauts, "
+          f"VAN totale si tout est accepté {test_2015['van'].sum() / 1e6:.1f} M$")
+    return (test_2015,)
+
+
+@app.cell
+def _(FEATURES, SEUIL, modele, np, pl, roc_auc_score, test_2015):
+    # Décision accepter / refuser sur le test 2015 : le modèle contre les autres façons de décider
+
+    # 1. Ce qui s'est réellement passé pour chaque prêt
+    _defaut = test_2015["defaut"].to_numpy()          # 1 = défaut
+    _van = test_2015["van"].to_numpy()                # ce que le prêt a rapporté
+
+    # 2. Décision du modèle : accepté si la probabilité de défaut est sous le seuil
+    _p = modele.predict_proba(test_2015[FEATURES])[:, 1]
+    _accepte_modele = _p < SEUIL
+    _nb_acceptes = _accepte_modele.sum()
+
+    # 3. Les autres façons de décider (True = accepté)
+    _accepte_tout = np.ones(len(_defaut), dtype=bool)
+    _accepte_regle = ~((test_2015["dti"] > 30) | (test_2015["fico"] < 670)).to_numpy()
+    # la banque accepte autant de prêts que le modèle : les mieux notés (A1, A2, ...)
+    _accepte_banque = (test_2015["note_lc"].rank(method="first") <= _nb_acceptes).to_numpy()
+
+    # 4. Bilan de chaque décision
+    def _bilan(nom, accepte):
+        return {"décision": nom,
+                "acceptés %": round(accepte.mean() * 100, 1),
+                "défaut chez les acceptés %": round(_defaut[accepte].mean() * 100, 1),
+                "VAN totale M$": round(_van[accepte].sum() / 1e6, 1)}
+
+    print(f"AUC test : modèle {roc_auc_score(_defaut, _p):.3f}, "
+          f"note de la banque {roc_auc_score(_defaut, test_2015['note_lc']):.3f}")
+    pl.DataFrame([
+        _bilan("Tout accepter", _accepte_tout),
+        _bilan("Règle simple (DTI > 30 ou FICO < 670 -> refus)", _accepte_regle),
+        _bilan("Note de la banque, même taux d'acceptation", _accepte_banque),
+        _bilan(f"Modèle (seuil {SEUIL:.3f})", _accepte_modele),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **Conclusion** : l’AUC du modèle (0.65) est un peu plus bas que celui de la note de la banque (0.68), qui utilise le dossier de crédit complet. Mais pour décider qui financer, le modèle fait mieux : à taux d’acceptation égal, sa VAN est de 38 M$ contre 30 M$ pour la banque, et 29 M$ si on accepte tout.
+
+    Limite : on ne connaît que les prêts déjà acceptés par la banque. (on ne pouvait pas faire autrement. Un dossier refusé n’a jamais reçu de prêt, donc on ne sait pas s’il aurait remboursé. Il n’a pas de cible (défaut ou non), ni de VAN.)
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 7. Sauvegarde et fonctions pour le chatbot
 
     Le chatbot ne reçoit jamais la probabilité ni le seuil (le client ne doit pas pouvoir « viser » le seuil),
     et une valeur manquante n'est jamais citée comme point fort ou faible.
@@ -499,7 +794,7 @@ def _(FEATURES, SEUIL, X_train, modele):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 7. Example 101 d'utilisation du modèle par le chatbot
+    ## 8. Example 101 d'utilisation du modèle par le chatbot
 
     Le chatbot :
     1. charge le modèle sauvegardé (`ct.charger_modele`) ;

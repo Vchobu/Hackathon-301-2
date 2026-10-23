@@ -17,13 +17,11 @@ dependencies = [
     "fastexcel>=0.21.0",
     "joblib>=1.6.0",
     "kagglehub>=1.0.2",
-    "langchain>=1.4.6",
     "langchain-mcp-adapters>=0.3.2",
     "langchain-openai>=1.1.0",
     "langchain-ollama>=1.1.0",
     "langsmith>=0.3.0",
     "lightgbm>=4.7.0",
-    "marimo>=0.25.1",
     "mcp[cli]>=1.30.0",
     "numpy>=2.5.4",
     "optuna>=5.0.0",
@@ -32,6 +30,7 @@ dependencies = [
     "polars>=2.0.0",
     "pyarrow>=26.0.0",
     "scikit-learn>=1.9.1",
+    "openai>=3.37.0",
 ]
 
 [project.scripts]
