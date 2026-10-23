@@ -1,4 +1,11 @@
-# agent.py
+"""Agent conseiller crédit : LLM (Ollama) + outils MCP (noter_reponse, evaluer_credit).
+
+Mode terminal : uv run src\\hackathon\\chatbot\\agent.py
+Mode web      : uv run GUI.py   (GUI.py importe creer_agent et ACCUEIL)
+
+Le prompt n'est plus fixe : collecte.py le reconstruit avant chaque appel du LLM
+(une question à la fois, puis l'appel à evaluer_credit, puis l'annonce de la décision).
+"""
 
 import sys
 from pathlib import Path
@@ -7,59 +14,29 @@ RACINE = Path(__file__).resolve().parents[3]
 if str(RACINE) not in sys.path:
     sys.path.insert(0, str(RACINE))
 
-
-
 import asyncio
-from pathlib import Path
+from contextlib import AsyncExitStack
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv()   # LangSmith
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.memory import InMemorySaver
-from credit_tool import DESCRIPTIONS, OBLIGATOIRES
 
+from hackathon.chatbot.collecte import configurer, historique_minimal, prompt_selon_etape
 from hackathon.chatbot.parameters import LLM_MODEL
 
-SERVEUR = Path(__file__).resolve().parent / "mcp_server.py"   # ← adapte
+VERIFICATEUR = False   # True : un second LLM contrôle chaque réponse (checker.py) — plus lent
 
-ACCUEIL = (
-    "Bonjour ! Je suis votre conseiller crédit."
-)
+SERVEUR = Path(__file__).resolve().parent / "mcp_server.py"
 
-texte_descriptions = "\n".join(f"- {nom} : {desc}" for nom, desc in DESCRIPTIONS.items())
-texte_obligatoires = ", ".join(OBLIGATOIRES)
-
-# MODIF (section F du prompt) : ajout de la règle « n'envoie QUE ce que le client a dit ».
-# Pourquoi : lors du test, l'agent a envoyé mort_acc = 0 sans jamais poser la question.
-CONSIGNES_LLM = f"""
-Tu es un conseiller crédit et uniquement ça.
-Tu échanges en français avec un particulier qui envisage un emprunt et tu es neutre, concis et tu ne te répètes pas.
-
-A. Contexte
-- Inutile de faire des salutations
-- Le service porte uniquement sur des prêts d'une durée de 36 mois.
-- Les autres durées sont hors sujets.
-- Les montants sont en dollars ($).
-
-B. Déroulé
-1. Demande au client s'il souhaite faire une demande de prêt.
-2. S'il en veut un, recueille toutes les informations listées en {texte_descriptions}. 
-3. Pose les questions UNE PAR UNE, en langage courant et de manière concis. 
-4. Si utile pour une question, donne un seul exemple de réponse, mais n'énumère jamais toutes les options possibles.
-5. Ces informations sont obligatoires : {texte_obligatoires}, les autres sont facultatives.
-6. Quand le profil est complet (il a répondu à toutes les questions), appelle l'outil d'évaluation et pas avant.
-7. résume la décision de l'outil d'évaluation.
-"""
-
-print(CONSIGNES_LLM)  # pour debug, à supprimer dans la version finale
-
-from contextlib import AsyncExitStack
-from langchain_mcp_adapters.tools import load_mcp_tools
+ACCUEIL = "Bonjour ! Je suis votre conseiller crédit. Quel montant souhaitez-vous emprunter ?"
 
 _PILE = AsyncExitStack()   # garde la session MCP ouverte tant que le programme tourne
+
 
 async def creer_agent():
     """Crée l'agent (LLM + outils MCP). Utilisé par le terminal et par GUI.py."""
@@ -70,16 +47,24 @@ async def creer_agent():
             "args": ["run", "python", str(SERVEUR)],
         }
     })
-    session = await _PILE.enter_async_context(client.session("credit"))
+    session = await _PILE.enter_async_context(client.session("credit"))   # serveur lancé une seule fois
     tools = await load_mcp_tools(session)
     for t in tools:
         t.handle_tool_error = True   # une erreur de l'outil est renvoyée au LLM comme message, sans planter
+
+    configurer(tools)                # lit noms, descriptions et obligatoires dans le schéma de evaluer_credit
+
+    middleware = [prompt_selon_etape, historique_minimal]   # l'ordre compte : prompt d'abord
+    if VERIFICATEUR:
+        from hackathon.chatbot.checker import verifier_reponse
+        middleware.append(verifier_reponse)
+
     llm = init_chat_model(LLM_MODEL, temperature=0.0, reasoning=False)
-    return create_agent(llm, tools, checkpointer=InMemorySaver(), system_prompt=CONSIGNES_LLM)
+    return create_agent(llm, tools, checkpointer=InMemorySaver(), middleware=middleware)
 
 
 async def main():
-    """Mode terminal : uv run src\\hackathon\\chatbot\\agent.py"""
+    """Mode terminal."""
     agent = await creer_agent()
     config = {"configurable": {"thread_id": "1"}}
     print("Agent :", ACCUEIL)
@@ -91,5 +76,5 @@ async def main():
         print("Agent :", reponse["messages"][-1].content)
 
 
-if __name__ == "__main__":      # ← la boucle ne démarre plus quand GUI.py importe ce fichier
+if __name__ == "__main__":      # la boucle ne démarre pas quand GUI.py importe ce fichier
     asyncio.run(main())
