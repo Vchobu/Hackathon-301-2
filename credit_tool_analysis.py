@@ -573,7 +573,7 @@ def _(
                         "écart-type": round(_aucs.std(), 3),
                         "AUC validation 2014": round(_auc_val, 3)})
     pl.DataFrame(_lignes)
-    return
+    return (pd,)
 
 
 @app.cell(hide_code=True)
@@ -638,6 +638,125 @@ def _(p_val, y_val):
 def _(mo):
     mo.md(r"""
     ## 6. Évaluation finale sur le test (2015)
+
+    On compare les modèles sur la **VAN** (valeur actuelle nette) de chaque prêt, taux 1%
+    (montant prêté + paiements reçus). Un prêt refusé a une VAN de 0.
+    """)
+    return
+
+
+@app.cell
+def _(ANNEES, X_train, ct, pd, pl):
+    # Prêts de test relus avec les colonnes nécessaires à la VAN (pas données au modèle!)
+    COLONNES_CLIENT = ["loan_amnt", "annual_inc", "dti", "fico_range_low", "fico_range_high",
+                       "mort_acc", "inq_last_6mths", "revol_util", "purpose", "home_ownership"]
+    COLONNES_VAN = ["funded_amnt", "total_pymnt", "recoveries", "collection_recovery_fee", "last_pymnt_d", "sub_grade"]
+
+    # 1. Prêts de 36 mois, terminés, émis l'année de test
+    test_2015 = (
+        pl.read_csv(ct.DATA_PATH, columns=["issue_d", "loan_status", "term"] + COLONNES_CLIENT + COLONNES_VAN,
+                    infer_schema_length=200_000, ignore_errors=True)
+        .with_columns(
+            pl.col("issue_d").str.strptime(pl.Date, "%b-%Y", strict=False).alias("debut"),
+            pl.col("last_pymnt_d").str.strptime(pl.Date, "%b-%Y", strict=False).alias("fin"),
+        )
+        .filter(
+            pl.col("term").str.contains("36"),
+            pl.col("debut").dt.year().is_in(ANNEES["test"]),
+            pl.col("loan_status").is_in(["Fully Paid", "Charged Off", "Default"]),
+        )
+    )
+
+    # 2. Cible et features, formatting comme en 4.a
+    test_2015 = test_2015.with_columns(
+        (pl.col("loan_status") != "Fully Paid").cast(pl.Int8).alias("defaut"),
+        ((pl.col("fico_range_low") + pl.col("fico_range_high")) / 2).alias("fico"),
+        (pl.col("loan_amnt") / pl.col("annual_inc").clip(lower_bound=1)).alias("loan_to_income"),
+    )
+
+    # 3. VAN de chaque prêt
+    TAUX_ACTU = 0.05                                  # obligations d’entreprises notées Baa, moyenne 2015
+    _r = (1 + TAUX_ACTU) ** (1 / 12) - 1              # taux mensuel
+
+    # a. Nombre de mois de paiement, entre l'émission et le dernier paiement (au moins 1)
+    test_2015 = test_2015.with_columns(
+        ((pl.col("fin").dt.year() - pl.col("debut").dt.year()) * 12
+         + pl.col("fin").dt.month() - pl.col("debut").dt.month()).fill_null(1).clip(1).alias("mois")
+    )
+
+    # b. Facteur d'actualisation : valeur aujourd'hui d'1 $ reçu au dernier mois
+    test_2015 = test_2015.with_columns(((1 + _r) ** -pl.col("mois")).alias("actu"))
+
+    # c. Argent reçu : payé par le client, et récupéré après un défaut (moins les frais de recouvrement)
+    test_2015 = test_2015.with_columns(
+        (pl.col("total_pymnt") - pl.col("recoveries")).alias("paye"),
+        (pl.col("recoveries") - pl.col("collection_recovery_fee")).alias("recupere"),
+    )
+
+    # d. VAN = - montant prêté + mensualités actualisées + recouvrement actualisé
+    test_2015 = test_2015.with_columns(
+        (-pl.col("funded_amnt")
+         + pl.col("paye") / pl.col("mois") * (1 - pl.col("actu")) / _r
+         + pl.col("recupere") * pl.col("actu")).alias("van")
+    )
+
+    # 4. Note de la banque en rang : A1 = 0 (sûr) ... G5 = 34 (risqué)
+    _notes = [f"{lettre}{chiffre}" for lettre in "ABCDEFG" for chiffre in range(1, 6)]
+    test_2015 = test_2015.with_columns(pl.col("sub_grade").replace_strict(_notes, list(range(35))).alias("note_lc"))
+
+    # 5. Pandas, avec les mêmes catégories que le train
+    test_2015 = test_2015.to_pandas()
+    for _c in ["purpose", "home_ownership"]:
+        test_2015[_c] = pd.Categorical(test_2015[_c], categories=X_train[_c].cat.categories)
+
+    print(f"Test {ANNEES['test']} : {len(test_2015)} prêts, {test_2015['defaut'].mean() * 100:.1f} % de défauts, "
+          f"VAN totale si tout est accepté {test_2015['van'].sum() / 1e6:.1f} M$")
+    return (test_2015,)
+
+
+@app.cell
+def _(FEATURES, SEUIL, modele, np, pl, roc_auc_score, test_2015):
+    # Décision accepter / refuser sur le test 2015 : le modèle contre les autres façons de décider
+
+    # 1. Ce qui s'est réellement passé pour chaque prêt
+    _defaut = test_2015["defaut"].to_numpy()          # 1 = défaut
+    _van = test_2015["van"].to_numpy()                # ce que le prêt a rapporté
+
+    # 2. Décision du modèle : accepté si la probabilité de défaut est sous le seuil
+    _p = modele.predict_proba(test_2015[FEATURES])[:, 1]
+    _accepte_modele = _p < SEUIL
+    _nb_acceptes = _accepte_modele.sum()
+
+    # 3. Les autres façons de décider (True = accepté)
+    _accepte_tout = np.ones(len(_defaut), dtype=bool)
+    _accepte_regle = ~((test_2015["dti"] > 30) | (test_2015["fico"] < 670)).to_numpy()
+    # la banque accepte autant de prêts que le modèle : les mieux notés (A1, A2, ...)
+    _accepte_banque = (test_2015["note_lc"].rank(method="first") <= _nb_acceptes).to_numpy()
+
+    # 4. Bilan de chaque décision
+    def _bilan(nom, accepte):
+        return {"décision": nom,
+                "acceptés %": round(accepte.mean() * 100, 1),
+                "défaut chez les acceptés %": round(_defaut[accepte].mean() * 100, 1),
+                "VAN totale M$": round(_van[accepte].sum() / 1e6, 1)}
+
+    print(f"AUC test : modèle {roc_auc_score(_defaut, _p):.3f}, "
+          f"note de la banque {roc_auc_score(_defaut, test_2015['note_lc']):.3f}")
+    pl.DataFrame([
+        _bilan("Tout accepter", _accepte_tout),
+        _bilan("Règle simple (DTI > 30 ou FICO < 670 -> refus)", _accepte_regle),
+        _bilan("Note de la banque, même taux d'acceptation", _accepte_banque),
+        _bilan(f"Modèle (seuil {SEUIL:.3f})", _accepte_modele),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **Conclusion** : l’AUC du modèle (0.65) est un peu plus bas que celui de la note de la banque (0.68), qui utilise le dossier de crédit complet. Mais pour décider qui financer, le modèle fait mieux : à taux d’acceptation égal, sa VAN est de 38 M$ contre 30 M$ pour la banque, et 29 M$ si on accepte tout.
+
+    Limite : on ne connaît que les prêts déjà acceptés par la banque. (on ne pouvait pas faire autrement. Un dossier refusé n’a jamais reçu de prêt, donc on ne sait pas s’il aurait remboursé. Il n’a pas de cible (défaut ou non), ni de VAN.)
     """)
     return
 
