@@ -51,7 +51,11 @@ def colonnes_disponibles(path: str = DATA_PATH) -> list[str]:
 
 def charger_modele(path: str = MODELE_PATH) -> dict:
     """contient Modèle LightGBM, seuil, liste des features et catégories"""
-    return joblib.load(path)
+    art = joblib.load(path)
+    modele = art["modele"]
+    if hasattr(modele, "set_params"):
+        modele.set_params(n_jobs=1)
+    return art
 
 def vers_features(demande: dict, art: dict) -> pd.DataFrame:
     """ Input : réponses du client (dict) et artefact du modèle.
@@ -114,15 +118,29 @@ def montant_max(demande: dict, art: dict, pas: int = 500, minimum: int = 1000) -
     """En cas de refus : on test des montants d'emprunt plus faible
      (par pas de 500 $) que le modèle accepterait
      ou None si aucun montant ne passe avec les valeurs du client"""
-    montant = demande["loan_amnt"] - pas                 # premier essai : 500 $ de moins
+    premier_montant = demande["loan_amnt"] - pas
+    if premier_montant < minimum:
+        return {"montant_max": None}
 
-    while montant >= minimum:
-        demande_reduite = {**demande, "loan_amnt": montant}   # reprend la demande avec un montant plus petit
-        if score_loan(demande_reduite, art)["decision"] == "accord":
-            return {"montant_max": montant}              # si ça passe on retourne ce montant
-        montant -= pas                                   # sinon, on continue la boucle (-500 $)
+    nombre_candidats = (premier_montant - minimum) // pas + 1
+    gauche, droite = 0, nombre_candidats - 1
+    meilleur = None
 
-    return {"montant_max": None}                         # aucun montant accepté
+    # The risk increases with the loan amount through loan_to_income, so the
+    # accepted amounts form a lower range of the candidate amounts.
+    while gauche <= droite:
+        milieu = (gauche + droite) // 2
+        montant = premier_montant - milieu * pas
+        X = vers_features({**demande, "loan_amnt": montant}, art)
+        probabilite = art["modele"].predict_proba(X)[0, 1]
+
+        if probabilite < art["seuil"]:
+            meilleur = montant
+            droite = milieu - 1
+        else:
+            gauche = milieu + 1
+
+    return {"montant_max": meilleur}                     # aucun montant accepté si None
 
 
 
@@ -133,38 +151,77 @@ def montant_max(demande: dict, art: dict, pas: int = 500, minimum: int = 1000) -
 # ***********************************************************************************
 
 # noms des features -> mots compréhensibles par le client
-LIBELLES = {
-    "fico": "votre historique de crédit (score FICO)",
-    "annual_inc": "votre revenu",
-    "loan_to_income": "le montant demandé par rapport à votre revenu",
-    "dti": "vos mensualités de crédit actuelles par rapport à votre revenu",
-    "inq_last_6mths": "vos demandes de crédit récentes",
-    "revol_util": "l'utilisation de vos cartes de crédit",
-    "mort_acc": "vos prêts immobiliers",
-    "purpose": "l'objet du prêt",
-    "home_ownership": "votre situation de logement",
+FEATURES = {
+    "fico": {
+        "libelle": "votre historique de crédit",
+        "description": "score de crédit FICO (échelle 300 à 850, plus c'est haut, meilleur est l'historique). "
+                       "Le modèle ne connaît que les scores à partir de ~660. "
+                       "Si le client ne le connaît pas, ne pas l'estimer.",
+    },
+    "annual_inc": {
+        "libelle": "votre revenu",
+        "description": "revenu annuel brut, en dollars. Si le client donne un revenu mensuel, multiplier par 12.",
+    },
+    # MODIF : la clé reste le nom du MODÈLE ("loan_to_income"), car score_loan renvoie ce nom dans
+    # points_forts / points_faibles et LIBELLES doit le connaître (sinon KeyError).
+    # "champ" = nom que le LLM envoie ; c'est vers_features qui calcule le ratio, pas le LLM
+    # (un LLM se trompe facilement dans une division, Python jamais).
+    # Avant : clé "loan_to_amnt" (faute de frappe) + description de ratio -> le LLM envoyait 0.5.
+    "loan_to_income": {
+        "champ": "loan_amnt",
+        "libelle": "le montant demandé par rapport à votre revenu",
+        "description": "montant du prêt demandé, en dollars (ex. 15000). Envoyer le montant tel quel, "
+                       "ne calculer aucun ratio.",
+    },
+    # MODIF : même logique pour "dti" (nom du modèle) / "mensualites_dettes" (nom envoyé par le LLM).
+    # Avant : la description parlait de "taux d'endettement en %" -> le LLM calculait lui-même
+    # un pourcentage (2.5) au lieu d'envoyer le montant donné par le client (1000).
+    # On précise aussi "PAR MOIS" : une dette totale n'est pas une mensualité.
+    "dti": {
+        "champ": "mensualites_dettes",
+        "libelle": "votre niveau d'endettement actuel",
+        "description": "total des mensualités de dettes actuelles, en dollars PAR MOIS (hors loyer, "
+                       "hors crédit immobilier et hors prêt demandé). 0 si aucune dette. "
+                       "Si le client donne un montant total de dette, lui demander combien il rembourse "
+                       "par mois. Envoyer le montant tel quel, ne calculer aucun ratio.",
+    },
+    "inq_last_6mths": {
+        "libelle": "vos demandes de crédit récentes",
+        # MODIF : "(pas un montant)" ajouté, l'agent demandait "le montant total des demandes".
+        "description": "nombre (pas un montant) de demandes de crédit faites ces 6 derniers mois "
+                       "(hors auto et immobilier), entier.",
+    },
+    "revol_util": {
+        "libelle": "l'utilisation de vos cartes de crédit",
+        "description": "taux d'utilisation des cartes de crédit en % : solde dû / plafond total × 100 "
+                       "(ex. 1 500 $ sur 5 000 $ → 30). Peut dépasser 100.",
+    },
+    "mort_acc": {
+        "libelle": "vos prêts immobiliers",
+        "description": "nombre de prêts immobiliers (en cours ou remboursés), entier.",
+    },
+    "purpose": {
+        "libelle": "l'objet du prêt",
+        "description": "objet du prêt : choisir la valeur acceptée la plus proche de ce que décrit le client "
+                       "(ex. voiture → car, regrouper des dettes → debt_consolidation).",
+    },
+    "home_ownership": {
+        "libelle": "votre situation de logement",
+        "description": "locataire → RENT, propriétaire sans crédit en cours → OWN, "
+                       "propriétaire avec crédit immobilier en cours → MORTGAGE.",
+    },
 }
 
-# instructions données au LLM avec l'outil
-DESCRIPTION_OUTIL = (
-    "Pré-évalue une demande de prêt personnel de 36 mois. "
-    "Avant d'appeler l'outil, pose les questions au client une à une, en langage simple. "
-    "loan_amnt et annual_inc sont obligatoires ; pour les autres champs, si le client ne connaît pas "
-    "la réponse, n'envoie pas le champ : n'invente jamais de valeur et ne calcule rien toi-même. "
-    "L'outil renvoie : decision (accord ou refus), points_forts et points_faibles (déjà formulés pour "
-    "le client) et, en cas de refus, montant_max (montant plus petit qui serait accepté, ou null). "
-    "C'est le modèle qui décide : reformule sa décision, ne la change jamais. "
-    "Explique-la avec les points forts et faibles. En cas de refus, propose montant_max s'il existe, "
-    "sinon oriente vers un conseiller. Ne donne jamais de probabilité, de score ou de seuil. "
-    "Précise toujours qu'il s'agit d'une pré-évaluation qu'un conseiller doit confirmer."
-)
-
-
+# Dérivés automatiquement : une seule source à maintenir
+LIBELLES = {nom: f["libelle"] for nom, f in FEATURES.items()}          # pour le client (outil_credit)
+# MODIF : clé = "champ" s'il existe (nom envoyé par le LLM), sinon le nom du modèle.
+# Ainsi le prompt annonce loan_amnt / mensualites_dettes, exactement ce que lit vers_features,
+# tandis que LIBELLES garde dti / loan_to_income, exactement ce que renvoie score_loan.
+DESCRIPTIONS = {f.get("champ", nom): f["description"] for nom, f in FEATURES.items()}  # pour le LLM (prompt)
 
 
 # champs obligatoires
 OBLIGATOIRES = ["loan_amnt", "annual_inc"]
-
 
 
 # ******************************************************************
@@ -181,6 +238,12 @@ def outil_credit(arguments: dict) -> dict:
     if _ART is None:
         _ART = charger_modele()
 
+    # MODIF : nettoyage des arguments du LLM avant tout calcul.
+    # - on retire les champs inconnus (ex. "loan_to_amnt" envoyé par erreur) ;
+    # - on retire les null : un champ facultatif absent est traité comme inconnu par vers_features.
+    champs_valides = set(DESCRIPTIONS)
+    arguments = {k: v for k, v in arguments.items() if k in champs_valides and v is not None}
+
     # 2. Sans montant ou sans revenu, on ne peut pas calculer : le LLM doit les demander
     manquants = [c for c in OBLIGATOIRES if arguments.get(c) is None]
     if manquants:
@@ -190,11 +253,12 @@ def outil_credit(arguments: dict) -> dict:
     resultat = score_loan(arguments, _ART)
 
     # 4. Noms techniques -> mots pour le client
-    resultat["points_forts"] = [LIBELLES[f] for f in resultat["points_forts"]]
-    resultat["points_faibles"] = [LIBELLES[f] for f in resultat["points_faibles"]]
+    # MODIF : .get(f, f) au lieu de [f] -> si une feature n'a pas de libellé, on renvoie son nom
+    # au lieu de planter avec une KeyError.
+    resultat["points_forts"] = [LIBELLES.get(f, f) for f in resultat["points_forts"]]
+    resultat["points_faibles"] = [LIBELLES.get(f, f) for f in resultat["points_faibles"]]
 
     # 5. En cas de refus : ajouter le plus grand montant acceptable
     if resultat["decision"] == "refus":
         resultat |= montant_max(arguments, _ART)
     return resultat
-

@@ -1,1 +1,3 @@
-LLM_MODEL = "ollama:qwen3.5:4b"
+LLM_MODEL = "ollama:qwen3.5:9b"
+LLM_PROVIDER = "ollama"
+OPENROUTER_MODEL = ""

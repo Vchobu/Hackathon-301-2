@@ -1,4 +1,16 @@
-from nicegui import run, ui
+import uuid
+
+from nicegui import app, ui
+
+from hackathon.chatbot.agent import ACCUEIL, creer_agent
+
+AGENT = None
+
+async def demarrer_agent():
+    global AGENT
+    AGENT = await creer_agent()
+
+app.on_startup(demarrer_agent)
 
 ui.add_head_html(
     """
@@ -72,27 +84,30 @@ ui.add_head_html(
 @ui.page("/")
 def chat_page() -> None:
     with ui.column().classes("w-full max-w-4xl mx-auto p-4 gap-4"):
-        ui.label("Chat with our AI").classes("text-2xl font-bold")
+        ui.label("Credit assistant").classes("text-2xl font-bold")
 
         chat_window = ui.column().classes("chat-window w-full gap-3")
         with chat_window:
             ui.label(
-                "Hello! I am a credit assistant. I can help collect the information needed for a preliminary credit assessment. How can I help you today?"
+                ACCUEIL
+
             ).classes("message message-assistant")
         with chat_window:
             typing_indicator = ui.html(
                 '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>'
             ).classes("message message-assistant")
         typing_indicator.set_visibility(False)
+        scroll_anchor = ui.element("div")
 
         with ui.row().classes("w-full items-end gap-2"):
             message_input = ui.textarea(
-                label="Your question",
-                placeholder="Message...",
+                label="Your message",
+                placeholder="Type your message...",
             ).classes("flex-1")
             send_button = ui.button("Send", icon="send").classes("h-14")
 
         is_waiting = False
+        thread_id = str(uuid.uuid4())   # une conversation séparée par onglet du navigateur
         conversation_history: list[tuple[str, str]] = []
 
     def add_message(text: str, sender: str) -> None:
@@ -101,6 +116,14 @@ def chat_page() -> None:
         )
         with chat_window:
             ui.label(text).classes(classes)
+        scroll_to_bottom()
+
+    def scroll_to_bottom() -> None:
+        scroll_anchor.move(chat_window)
+        scroll_anchor.run_method(
+            "scrollIntoView",
+            {"behavior": "smooth", "block": "end"},
+        )
 
     async def send_message(_event=None) -> None:
         nonlocal is_waiting
@@ -115,13 +138,16 @@ def chat_page() -> None:
         message_input.disable()
         typing_indicator.move(chat_window)
         typing_indicator.set_visibility(True)
+        scroll_to_bottom()
 
         try:
-            answer = await run.io_bound(
-                YOUR_AI_HERE, question, conversation_history.copy()
+            reponse = await AGENT.ainvoke(
+                {"messages": [{"role": "user", "content": question}]},
+                {"configurable": {"thread_id": thread_id}},
             )
+            answer = reponse["messages"][-1].content   # dernier message = réponse de l'agent
             conversation_history.append((question, answer))
-            add_message(answer or "Model did not return a text response.", "assistant")
+            add_message(answer or "The assistant did not return a text response.", "assistant")
         except Exception as error:
             error_message = f"Failed to get response: {error}"
             add_message(error_message, "assistant")
