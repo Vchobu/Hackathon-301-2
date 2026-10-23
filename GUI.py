@@ -1,12 +1,14 @@
 import uuid
-from nicegui import app, run, ui
-from hackathon.chatbot.agent import creer_agent, ACCUEIL
+
+from nicegui import app, ui
+
+from hackathon.chatbot.agent import ACCUEIL, creer_agent
 
 AGENT = None
 
 async def demarrer_agent():
     global AGENT
-    AGENT = await creer_agent()      # créé une seule fois, au lancement du serveur web
+    AGENT = await creer_agent()
 
 app.on_startup(demarrer_agent)
 
@@ -95,6 +97,7 @@ def chat_page() -> None:
                 '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>'
             ).classes("message message-assistant")
         typing_indicator.set_visibility(False)
+        scroll_anchor = ui.element("div")
 
         with ui.row().classes("w-full items-end gap-2"):
             message_input = ui.textarea(
@@ -113,6 +116,14 @@ def chat_page() -> None:
         )
         with chat_window:
             ui.label(text).classes(classes)
+        scroll_to_bottom()
+
+    def scroll_to_bottom() -> None:
+        scroll_anchor.move(chat_window)
+        scroll_anchor.run_method(
+            "scrollIntoView",
+            {"behavior": "smooth", "block": "end"},
+        )
 
     async def send_message(_event=None) -> None:
         nonlocal is_waiting
@@ -127,6 +138,7 @@ def chat_page() -> None:
         message_input.disable()
         typing_indicator.move(chat_window)
         typing_indicator.set_visibility(True)
+        scroll_to_bottom()
 
         try:
             reponse = await AGENT.ainvoke(
