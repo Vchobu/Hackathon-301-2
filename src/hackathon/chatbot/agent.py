@@ -246,8 +246,8 @@ async def creer_agent():
     client = MultiServerMCPClient({
         "credit": {
             "transport": "stdio",
-            "command": "uv",
-            "args": ["run", "python", str(SERVEUR)],
+            "command": sys.executable,   # meme Python que le GUI (evite que uv reprenne .venv)
+            "args": [str(SERVEUR)],
         }
     })
     session = await _PILE.enter_async_context(client.session("credit"))
