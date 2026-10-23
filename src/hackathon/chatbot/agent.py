@@ -222,7 +222,9 @@ class AskedFieldsMiddleware(AgentMiddleware):
 def create_llm():
     provider = os.getenv("LLM_PROVIDER", LLM_PROVIDER).strip().lower()
     if provider == "ollama":
-        return init_chat_model(LLM_MODEL, temperature=0.0, reasoning=False)
+        # Carnaval (gpu6) en principal, Ollama local en secours : voir llm_serveur.py
+        from llm_serveur import modele_langchain
+        return modele_langchain()
     if provider == "openrouter":
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
