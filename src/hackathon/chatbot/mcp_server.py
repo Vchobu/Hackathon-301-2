@@ -1,10 +1,3 @@
-"""MCP server exposing the credit model (LightGBM).
-
-Run       : uv run python -m hackathon.chatbot.mcp_server
-Test      : uv run mcp dev src/hackathon/chatbot/mcp_server.py
-
-"""
-
 import json
 import logging
 import os

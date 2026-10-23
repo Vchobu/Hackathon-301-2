@@ -12,8 +12,9 @@ if str(RACINE) not in sys.path:
 import asyncio
 import os
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -24,11 +25,10 @@ from langchain.agents.middleware import (
     AgentMiddleware,
     ModelRequest,
     ModelResponse,
-    SummarizationMiddleware,
 )
 from langchain.chat_models import init_chat_model
-from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 
 from credit_tool import DESCRIPTIONS, OBLIGATOIRES
@@ -145,15 +145,6 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 
 _PILE = AsyncExitStack()   # garde la session MCP ouverte tant que le programme tourne
 
-SUMMARY_PROMPT = """Summarize the older part of this credit-assistant conversation.
-Keep only information needed to continue the application:
-- the client's intent and requested loan type and term;
-- every explicitly confirmed profile value, including loan amount and annual income;
-- every field the client explicitly skipped or said they do not know;
-- corrections to previously provided values, keeping only the latest value;
-- any completed assessment result and relevant unresolved questions.
-Never invent or infer a value. Preserve field names and numeric values exactly.
-Use concise English. The summary will replace the older messages."""
 
 FIELD_QUESTION_HINTS = {
     "loan_amnt": ("loan amount", "how much", "borrow"),
