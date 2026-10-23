@@ -11,14 +11,21 @@ if str(RACINE) not in sys.path:
 
 import asyncio
 import os
+import re
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelRequest,
+    ModelResponse,
+    SummarizationMiddleware,
+)
 from langchain.chat_models import init_chat_model
 from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -148,6 +155,70 @@ Keep only information needed to continue the application:
 Never invent or infer a value. Preserve field names and numeric values exactly.
 Use concise English. The summary will replace the older messages."""
 
+FIELD_QUESTION_HINTS = {
+    "loan_amnt": ("loan amount", "how much", "borrow"),
+    "annual_inc": ("annual income", "yearly income", "gross income"),
+    "fico": ("fico", "credit score"),
+    "mensualites_dettes": ("monthly debt", "debt payments", "monthly payments"),
+    "inq_last_6mths": ("credit inquiries", "credit applications", "inquiries"),
+    "revol_util": ("credit card utilization", "card utilization", "credit card balance"),
+    "mort_acc": ("mortgage accounts", "mortgage loans", "mortgages"),
+    "purpose": ("purpose", "what.*loan.*for", "use.*loan"),
+    "home_ownership": ("housing", "home ownership", "rent", "own.*home"),
+}
+
+
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content.lower()
+    return str(content).lower()
+
+
+class AskedFieldsMiddleware(AgentMiddleware):
+    """Remind the model which profile questions it has already asked."""
+
+    def _request_with_reminder(self, request: ModelRequest) -> ModelRequest:
+        assistant_text = "\n".join(
+            _message_text(message)
+            for message in request.messages
+            if getattr(message, "type", None) == "ai"
+        )
+        asked = [
+            field
+            for field, hints in FIELD_QUESTION_HINTS.items()
+            if any(re.search(hint, assistant_text) for hint in hints)
+        ]
+        if not asked:
+            return request
+        remaining = [field for field in FIELD_QUESTION_HINTS if field not in asked]
+        reminder = (
+            "\n\nPYTHON CONVERSATION CHECKLIST (internal):\n"
+            f"Already asked about: {', '.join(asked)}.\n"
+            f"Still not asked about: {', '.join(remaining) or 'none'}.\n"
+            "Do not repeat an already asked question unless the client is correcting "
+            "that field or the previous answer was ambiguous. Ask the next unanswered "
+            "field instead."
+        )
+        return request.override(
+            system_prompt=f"{request.system_prompt or CONSIGNES_LLM}{reminder}"
+        )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return handler(self._request_with_reminder(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        return await handler(self._request_with_reminder(request))
+
+
 def create_llm():
     provider = os.getenv("LLM_PROVIDER", LLM_PROVIDER).strip().lower()
     if provider == "ollama":
@@ -182,16 +253,11 @@ async def creer_agent():
     for tool in tools:
         tool.handle_tool_error = True
     llm = create_llm()
-    summarization = SummarizationMiddleware(
-        model=llm,
-        trigger=("messages", 16),
-        keep=("messages", 8),
-        summary_prompt=SUMMARY_PROMPT,
-    )
+    
     return create_agent(
         llm,
         tools,
-        middleware=[summarization],
+        middleware=[AskedFieldsMiddleware()],
         checkpointer=InMemorySaver(),
         system_prompt=CONSIGNES_LLM,
     )
