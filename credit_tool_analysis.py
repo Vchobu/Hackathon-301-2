@@ -219,7 +219,7 @@ def _(NUM, pl, train):
     corr = train.select(NUM + ["defaut"]).drop_nulls().select(pl.all().rank()).corr()
     px.imshow(corr.to_numpy(), x=corr.columns, y=corr.columns, text_auto=".2f",
               color_continuous_scale="RdBu_r", zmin=-1, zmax=1, width=700, height=700)
-    return (corr,)
+    return corr, px
 
 
 @app.cell
@@ -600,12 +600,10 @@ def _(mo):
 
 
 @app.cell
-def _(FEATURES, X_val, modele, np, pl):
-    import plotly.express as _px
-
+def _(FEATURES, X_val, modele, np, pl, px):
     _contrib = modele.predict(X_val.sample(20_000, random_state=42), pred_contrib=True)[:, :-1]  # sans le biais
     _importance = pl.DataFrame({"feature": FEATURES, "importance": np.abs(_contrib).mean(axis=0)}).sort("importance")
-    _px.bar(_importance.to_pandas(), x="importance", y="feature", orientation="h")
+    px.bar(_importance.to_pandas(), x="importance", y="feature", orientation="h")
     return
 
 
@@ -748,6 +746,58 @@ def _(FEATURES, SEUIL, modele, np, pl, roc_auc_score, test_2015):
         _bilan("Note de la banque, même taux d'acceptation", _accepte_banque),
         _bilan(f"Modèle (seuil {SEUIL:.3f})", _accepte_modele),
     ])
+    return
+
+
+@app.cell
+def _(FEATURES, SEUIL, modele, np, pl, px, test_2015):
+    # Courbe : VAN totale selon la part des dossiers acceptés, notre modèle contre la note de la banque
+
+    _van = test_2015["van"].to_numpy()
+    _scores = {
+        "Notre modèle": modele.predict_proba(test_2015[FEATURES])[:, 1],   # probabilité de défaut
+        "Note de la banque": test_2015["note_lc"].to_numpy(),              # A1 = 0 ... G5 = 34
+    }
+
+    # Pour chaque part acceptée : on garde les dossiers les moins risqués selon chaque score
+    _lignes = []
+    for _part in [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+        for _nom, _score in _scores.items():
+            _ordre = np.argsort(_score, kind="stable")                    # du moins au plus risqué
+            _acceptes = _ordre[: int(_part * len(_score))]
+            _lignes.append({"Part des dossiers acceptés": int(_part * 100), "décision": _nom,
+                            "VAN totale (M$)": round(_van[_acceptes].sum() / 1e6, 1)})
+
+    _fig = px.line(pl.DataFrame(_lignes).to_pandas(), x="Part des dossiers acceptés", y="VAN totale (M$)",
+                   color="décision", markers=True,
+                   title="VAN totale 2015 selon la part des dossiers acceptés",
+                   color_discrete_map={"Notre modèle": "#D9692A", "Note de la banque": "#2F6FB0"})
+
+    # Ligne verticale : part des dossiers acceptés au seuil du modèle (environ 61.5 %)
+    _part_seuil = (_scores["Notre modèle"] < SEUIL).mean() * 100
+    _fig.add_vline(x=_part_seuil, line_dash="dash", line_color="#6B7280",
+                   annotation_text=f"seuil du modèle ({_part_seuil:.1f} %)", annotation_position="top")
+
+    # Point : la règle simple (refus si DTI > 30 ou FICO < 670), une seule décision
+    _regle = ~((test_2015["dti"] > 30) | (test_2015["fico"] < 670)).to_numpy()
+    _fig.add_scatter(x=[_regle.mean() * 100], y=[round(_van[_regle].sum() / 1e6, 1)],
+                     mode="markers", name="Règle DTI > 30 ou FICO < 670",
+                     marker=dict(symbol="diamond", size=18, color="#14213D"))
+
+    # Mise en forme pour la présentation : textes plus grands, lignes plus épaisses
+    _fig.update_layout(
+        font=dict(size=22),                     # taille de base : axes, légende, annotation
+        title_font_size=28,
+        legend=dict(font=dict(size=22), title_text=""),
+        width=1100, height=650,                 # même proportion que l'emplacement sur la slide
+        margin=dict(t=110),                     # place pour le titre et l'annotation du seuil
+        plot_bgcolor="white",
+    )
+    _fig.update_traces(line_width=4, marker_size=12)
+    _fig.update_xaxes(title_font_size=24, tickfont_size=22, gridcolor="#E5E5E5", ticksuffix=" %")
+    _fig.update_yaxes(title_font_size=24, tickfont_size=22, gridcolor="#E5E5E5")
+
+    _fig
     return
 
 
